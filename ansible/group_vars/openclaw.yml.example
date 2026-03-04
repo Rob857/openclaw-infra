@@ -11,6 +11,14 @@
 # Enable remote Mac node exec (see docs/SECURITY.md §5 for risks)
 # node_exec_enabled: true
 
+# --- Heartbeat quiet hours (optional) ---
+# Suppress heartbeats outside a time window (uses openclaw_timezone).
+# Omit entirely to allow heartbeats 24/7.
+#
+# openclaw_heartbeat_active_hours:
+#   start: "07:00"
+#   end: "24:00"
+
 # --- Multi-agent setup (uncomment and customize) ---
 # By default, all.yml defines a single "main" agent. Adding agents here automatically
 # generates per-agent MCP servers, workspaces, and token mappings (via playbook.yml
