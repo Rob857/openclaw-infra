@@ -42,10 +42,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: pulumi/package-lock.json
 
       - name: Install Pulumi dependencies
-        run: cd pulumi && npm ci
+        run: npm ci
 
       - name: Install Pulumi CLI
         run: |
