@@ -303,6 +303,7 @@ for i in $(seq 1 $MAX_RETRIES); do
     # Try each candidate via SSH
     for TARGET in $CANDIDATES; do
         SSH_ERR=$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
            ubuntu@"$TARGET" true 2>&1) && {
             HOST="$TARGET"
             echo "SSH connectivity established (via $HOST)"
