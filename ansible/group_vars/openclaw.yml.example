@@ -37,6 +37,7 @@
 #     deliver_channel: "telegram"      # telegram (default), whatsapp, or discord
 #     heartbeat_every: "15m"
 #     heartbeat_model: "anthropic/claude-opus-4-6"  # override default Sonnet
+#     sandbox_mode: "off"  # override default sandbox mode (also sets exec.host=gateway)
 #   - id: "second-agent"
 #     is_default: false
 #     deliver_to: "{{ telegram_second_user_id | default('') }}"
