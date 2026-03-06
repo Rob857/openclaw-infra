@@ -631,6 +631,12 @@
     - claude_setup_token | default('') | length > 0
     - codex_proxy_gateway_ip is defined
 
+- name: Check if Claude Code MCP image exists
+  ansible.builtin.command: docker image inspect {{ openclaw_mcp_adapter.claude_code_docker_image }}
+  register: claude_code_image_exists
+  changed_when: false
+  failed_when: false
+
 - name: Validate ANTHROPIC_BASE_URL support in Claude Code container
   ansible.builtin.shell: |
     set -euo pipefail
@@ -658,6 +664,13 @@
   when:
     - claude_setup_token | default('') | length > 0
     - codex_proxy_gateway_ip is defined
+    - claude_code_image_exists.rc == 0
+
+- name: Check if Pi MCP image exists
+  ansible.builtin.command: docker image inspect {{ openclaw_mcp_adapter.pi_mcp_docker_image }}
+  register: pi_image_exists
+  changed_when: false
+  failed_when: false
 
 - name: Validate ANTHROPIC_BASE_URL support in Pi container
   ansible.builtin.shell: |
@@ -689,6 +702,7 @@
   when:
     - claude_setup_token | default('') | length > 0
     - codex_proxy_gateway_ip is defined
+    - pi_image_exists.rc == 0
 
 - name: Clean up validation scripts
   ansible.builtin.file:
