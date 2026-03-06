@@ -215,9 +215,12 @@ jobs:
             | grep -oE "openclaw-staging(-[0-9]+)?" \
             | head -1)
           TAILNET=$(tailscale status --json | jq -r '.MagicDNSSuffix')
-          ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            "ubuntu@${HOST}.${TAILNET}" \
-            'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start workspace-git-sync.service'
+          # Per-agent workspace services (workspace-git-sync-<agent_id>.service)
+          for agent in main test; do
+            ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              "ubuntu@${HOST}.${TAILNET}" \
+              "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start workspace-git-sync-${agent}.service"
+          done
 
       # ── Verify ───────────────────────────────────────────────────
       - name: Run deployment verification
