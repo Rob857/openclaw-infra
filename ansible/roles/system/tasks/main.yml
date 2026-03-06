@@ -34,12 +34,12 @@
   changed_when: false
   failed_when: false
 
-- name: Install Node.js 22 LTS via NodeSource
+- name: Install Node.js via NodeSource
   when: node_installed.rc != 0
   block:
     - name: Add NodeSource GPG key and repository
       ansible.builtin.shell: |
-        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        curl -fsSL https://deb.nodesource.com/setup_{{ nodejs_major_version }}.x | bash -
       args:
         executable: /bin/bash
 

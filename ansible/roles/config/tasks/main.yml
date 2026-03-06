@@ -158,6 +158,11 @@
       changed_when: "'REGENERATED' in daemon_token_sync.stdout"
       notify: restart openclaw-gateway
 
+    - name: Check if MCP adapter plugin is installed
+      ansible.builtin.stat:
+        path: /home/ubuntu/.openclaw/extensions/openclaw-mcp-adapter/index.ts
+      register: mcp_adapter_installed
+
     - name: Configure gateway settings
       ansible.builtin.shell: |
         set -euo pipefail
@@ -223,7 +228,7 @@
 
         # Sandbox tool allowlist (all groups + plugins)
         {% set tool_allow = ["group:openclaw","group:runtime","group:fs","group:sessions","group:memory","group:web","group:ui","group:automation","group:messaging","group:nodes"] %}
-        {% if openclaw_mcp_adapter is defined %}
+        {% if openclaw_mcp_adapter is defined and mcp_adapter_installed.stat.exists %}
         {%   set _ = tool_allow.append("group:plugins") %}
         {%   set _ = tool_allow.append("openclaw-mcp-adapter") %}
         {% endif %}
@@ -236,7 +241,7 @@
         {% if openclaw_agents | selectattr('deliver_channel', 'defined') | selectattr('deliver_channel', 'equalto', 'whatsapp') | list | length > 0 %}
         {%   set _ = plugin_allow.append("whatsapp") %}
         {% endif %}
-        {% if openclaw_mcp_adapter is defined %}
+        {% if openclaw_mcp_adapter is defined and mcp_adapter_installed.stat.exists %}
         {%   set _ = plugin_allow.append("openclaw-mcp-adapter") %}
         {% endif %}
         check_set_json plugins.allow '{{ plugin_allow | to_json }}'

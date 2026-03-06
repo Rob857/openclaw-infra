@@ -37,6 +37,7 @@ openclaw_custom_models:
           # output), not just the excess. Staying under 200K is almost always cheaper.
           contextWindow: 200000
           maxTokens: 128000
+nodejs_major_version: 25
 openclaw_version: "2026.2.26"
 openclaw_heartbeat_interval: "30m"
 openclaw_agent_timeout_seconds: 1500  # 25 minutes per conversation turn (default: 600)

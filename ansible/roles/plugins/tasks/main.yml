@@ -57,7 +57,7 @@
       args:
         executable: /bin/bash
 
-    - name: Ensure plugin is in allowlist
+    - name: Ensure plugin is in allowlists
       ansible.builtin.shell: |
         set -euo pipefail
         python3 -c "
@@ -65,9 +65,22 @@
         config_path = '/home/ubuntu/.openclaw/openclaw.json'
         with open(config_path) as f:
             cfg = json.load(f)
+        changed = False
+
+        # plugins.allow
         allow = cfg.setdefault('plugins', {}).setdefault('allow', [])
         if 'openclaw-mcp-adapter' not in allow:
             allow.append('openclaw-mcp-adapter')
+            changed = True
+
+        # tools.sandbox.tools.allow
+        tool_allow = cfg.setdefault('tools', {}).setdefault('sandbox', {}).setdefault('tools', {}).setdefault('allow', [])
+        for entry in ['group:plugins', 'openclaw-mcp-adapter']:
+            if entry not in tool_allow:
+                tool_allow.append(entry)
+                changed = True
+
+        if changed:
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path), suffix='.tmp')
             try:
                 with os.fdopen(fd, 'w') as f:
