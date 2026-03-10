@@ -159,6 +159,7 @@ jobs:
           # Server config
           pulumi config set serverName openclaw-staging
           pulumi config set serverType cx33
+          pulumi config set tailscaleTags "tag:server"
 
           # Agent IDs (main is always present; "test" is the additional agent)
           pulumi config set agentIds "test"

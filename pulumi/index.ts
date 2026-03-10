@@ -46,6 +46,7 @@ const obsidianVaultPassword = config.getSecret("obsidianVaultPassword");
 
 // Tailscale configuration
 const tailnetDnsName = config.get("tailnetDnsName") || "";
+const tailscaleTags = config.get("tailscaleTags"); // e.g., "tag:server"
 
 // Server configuration (with defaults)
 const serverName = config.get("serverName") || "openclaw-vps";
@@ -133,6 +134,7 @@ const firewall = createFirewall("openclaw-firewall", `${serverName}-firewall`);
 const userData = generateUserData({
     tailscaleAuthKey,
     hostname: serverName,
+    tailscaleTags,
 });
 
 // 3. Create the server with attached firewall

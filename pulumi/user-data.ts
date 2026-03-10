@@ -14,6 +14,7 @@ import * as pulumi from "@pulumi/pulumi";
 export function generateUserData(config: {
     tailscaleAuthKey: pulumi.Output<string>;
     hostname: string;
+    tailscaleTags?: string;
 }): pulumi.Output<string> {
     return config.tailscaleAuthKey.apply(
         (tsKey) => `#!/bin/bash
@@ -47,7 +48,7 @@ curl -fsSL https://tailscale.com/install.sh | sh
 echo "${tsKey}" > /tmp/ts-authkey
 chmod 600 /tmp/ts-authkey
 
-tailscale up --authkey "file:/tmp/ts-authkey" --hostname="${config.hostname}" --ssh
+tailscale up --authkey "file:/tmp/ts-authkey" --hostname="${config.hostname}" --ssh${config.tailscaleTags ? ` --advertise-tags=${config.tailscaleTags}` : ""}
 
 rm -f /tmp/ts-authkey
 
