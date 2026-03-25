@@ -1,0 +1,118 @@
+---
+- name: Ensure Mission Control checkout parent exists
+  ansible.builtin.file:
+    path: "{{ mission_control_checkout_path | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Clone/update Mission Control repo
+  ansible.builtin.git:
+    repo: "{{ mission_control_repo_url }}"
+    dest: "{{ mission_control_checkout_path }}"
+    version: "{{ mission_control_git_revision }}"
+    update: true
+  register: mission_control_repo
+
+- name: Check if Mission Control systemd service exists
+  ansible.builtin.stat:
+    path: /home/ubuntu/.config/systemd/user/openclaw-dashboard.service
+  register: mission_control_service
+
+- name: Read Mission Control systemd service
+  ansible.builtin.slurp:
+    src: /home/ubuntu/.config/systemd/user/openclaw-dashboard.service
+  register: mission_control_service_raw
+  when: mission_control_service.stat.exists
+
+- name: Check if Mission Control production build exists
+  ansible.builtin.stat:
+    path: "{{ mission_control_checkout_path }}/.next/BUILD_ID"
+  register: mission_control_build
+
+- name: Decide whether Mission Control setup is needed
+  ansible.builtin.set_fact:
+    mission_control_setup_needed: >-
+      {{
+        (mission_control_repo is changed)
+        or (force_mission_control_rebuild | default(false) | bool)
+        or (not mission_control_service.stat.exists)
+        or (not mission_control_build.stat.exists)
+        or (
+          mission_control_service.stat.exists and
+          (
+            ('Environment=PORT=' ~ (mission_control_port | string)) not in (mission_control_service_raw.content | b64decode)
+            or ('Environment=HOST=' ~ mission_control_host) not in (mission_control_service_raw.content | b64decode)
+          )
+        )
+      }}
+
+- name: Run upstream Mission Control setup
+  ansible.builtin.command:
+    argv:
+      - ./setup.sh
+      - --port
+      - "{{ mission_control_port | string }}"
+      - --host
+      - "{{ mission_control_host }}"
+  args:
+    chdir: "{{ mission_control_checkout_path }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/1000"
+  register: mission_control_setup
+  changed_when: true
+  when: mission_control_setup_needed | bool
+
+- name: Ensure Mission Control service is started and enabled
+  ansible.builtin.systemd:
+    name: openclaw-dashboard
+    state: "{{ 'restarted' if (mission_control_repo is changed) or (mission_control_setup_needed | bool) else 'started' }}"
+    enabled: true
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/1000"
+
+- name: Wait for Mission Control HTTP endpoint
+  ansible.builtin.uri:
+    url: "http://{{ mission_control_host }}:{{ mission_control_port }}/"
+    method: GET
+    status_code: [200, 301, 302, 307, 308]
+  register: mission_control_health
+  retries: 20
+  delay: 3
+  until: mission_control_health.status in [200, 301, 302, 307, 308]
+
+- name: Read Tailscale Serve config
+  ansible.builtin.command: tailscale serve status --json
+  register: mission_control_serve_status
+  changed_when: false
+  become: true
+
+- name: Remove Mission Control Tailscale Serve path when disabled
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - serve
+      - --bg
+      - --set-path
+      - "{{ mission_control_serve_path }}"
+      - off
+  become: true
+  when: >-
+    not (mission_control_expose_via_tailscale | default(false) | bool) and
+    mission_control_serve_path in mission_control_serve_status.stdout
+
+- name: Ensure Mission Control is exposed via Tailscale Serve path
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - serve
+      - --bg
+      - --set-path
+      - "{{ mission_control_serve_path }}"
+      - "http://{{ mission_control_host }}:{{ mission_control_port }}"
+  become: true
+  when: >-
+    (mission_control_expose_via_tailscale | default(false) | bool) and (
+    mission_control_serve_path not in mission_control_serve_status.stdout or
+    ('http://' ~ mission_control_host ~ ':' ~ (mission_control_port | string)) not in mission_control_serve_status.stdout
+    )

@@ -44,6 +44,18 @@ openclaw_agent_timeout_seconds: 1500  # 25 minutes per conversation turn (defaul
 openclaw_cooldown_failure_window_hours: 1  # reset cooldown error count after 1h (default: 24)
 openclaw_elevated_default: "off"
 
+# Mission Control dashboard (robsannaa/openclaw-mission-control)
+# Pin the upstream commit for reproducibility and review before updating.
+mission_control_enabled: true
+mission_control_repo_url: "https://github.com/Mapletics/mission-control-2.git"
+mission_control_git_revision: "535104c599e26172201c6e5b0727b264123ab2d0"
+mission_control_checkout_path: "/home/ubuntu/mission-control"
+mission_control_host: "127.0.0.1"
+mission_control_port: 3333
+mission_control_expose_via_tailscale: false
+mission_control_serve_path: "/mission-control"
+force_mission_control_rebuild: false
+
 # Voice transcription (Groq Whisper)
 # Set via: pulumi config set groqApiKey --secret
 openclaw_audio_provider: "groq"

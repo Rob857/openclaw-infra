@@ -165,6 +165,7 @@
     - { role: docker,    tags: [docker],    become: true }
     - { role: ufw,       tags: [ufw],       become: true }
     - { role: openclaw,  tags: [openclaw] }
+    - { role: mission-control, tags: [mission-control], when: mission_control_enabled | default(false) | bool }
     - { role: config,    tags: [config] }
     - role: agents
       tags: [agents]

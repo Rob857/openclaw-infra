@@ -61,6 +61,7 @@ openclaw-infra/
 │       ├── docker/    # Docker install, ubuntu→docker group
 │       ├── ufw/       # Firewall rules
 │       ├── openclaw/  # Binary install, onboard, daemon
+│       ├── mission-control/  # OpenClaw Mission Control dashboard
 │       ├── config/    # All `openclaw config set` commands
 │       ├── agents/    # Create non-default agents, set bindings (conditional)
 │       ├── telegram/  # Telegram channel config, cron jobs (conditional)
@@ -100,6 +101,7 @@ Use `./scripts/provision.sh --tags <tag>` to run specific roles:
 | `docker` | docker | Docker upgrade or group changes |
 | `ufw` | ufw | Firewall rule changes |
 | `openclaw` | openclaw | Reinstall/update OpenClaw binary |
+| `mission-control` | mission-control | Deploy/update the Mission Control dashboard (localhost-only by default) |
 | `config` | config | Change model, sandbox mode, tool allowlist, elevated tools, auth settings, node exec |
 | `agents` | agents | Add/remove non-default agents, update Telegram bindings |
 | `telegram` | telegram | Update cron prompts or Telegram channel config |
@@ -169,6 +171,9 @@ pulumi up    # Creates server + auto-triggers Ansible provisioning
 
 # Update cron prompts (edit ansible/group_vars/all.yml first)
 ./scripts/provision.sh --tags telegram
+
+# Deploy/update Mission Control dashboard
+./scripts/provision.sh --tags mission-control
 
 # Dry run — see what would change
 ./scripts/provision.sh --check --diff

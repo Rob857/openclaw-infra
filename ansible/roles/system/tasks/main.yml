@@ -20,6 +20,7 @@
       - jq
       - python3
       - git
+      - sqlite3            # Required by Mission Control usage tracking
       - unzip               # Required by bun installer
       - poppler-utils       # pdftotext for qmd text extraction
       - tesseract-ocr       # OCR for images (replaces macOS Vision API)
