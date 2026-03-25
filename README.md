@@ -143,6 +143,7 @@ Your Machine ──(Tailscale)──> Hetzner VPS ──> OpenClaw Gateway
 ## Documentation
 
 - [CLAUDE.md](./CLAUDE.md) — Setup, operations, security, and troubleshooting
+- [docs/GIT-REMOTE-WORKFLOW.md](./docs/GIT-REMOTE-WORKFLOW.md) — How to work with `origin` (your fork) and `upstream`
 - [docs/SECURITY.md](./docs/SECURITY.md) — Threat model and mitigations
 - [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) — Common issues
 - [docs/BROWSER-CONTROL-PLANNING.md](./docs/BROWSER-CONTROL-PLANNING.md) — Future browser automation approaches
