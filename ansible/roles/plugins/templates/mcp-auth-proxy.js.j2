@@ -7,7 +7,8 @@
 //   /github-<id>/*  → github.com (per-agent PAT injection for git clone)
 //   /anthropic/*    → api.anthropic.com (credential injection for Claude Code + Pi)
 //                     Auto-detects token type: OAuth (sk-ant-oat*) → Bearer, API key → x-api-key
-//   /*              → chatgpt.com (Bearer token injection for Codex)
+//   /codex/<agent>/* → chatgpt.com (per-agent Bearer token injection for Codex)
+//   /*               → chatgpt.com (legacy default Codex auth)
 //
 // Zero npm dependencies. Listens on the Docker network gateway IP only,
 // so sandbox containers on the default bridge cannot reach it.
@@ -24,7 +25,8 @@ const { pipeline } = require('stream');
 
 const LISTEN_HOST = process.env.CODEX_PROXY_LISTEN || '127.0.0.1';
 const LISTEN_PORT = parseInt(process.env.CODEX_PROXY_PORT || '{{ openclaw_mcp_adapter.codex_proxy_port }}', 10);
-const AUTH_PATH = process.env.CODEX_AUTH_PATH || '/home/ubuntu/.codex/auth.json';
+const LEGACY_CODEX_AUTH_PATH = process.env.CODEX_AUTH_PATH || '/home/ubuntu/.codex/auth.json';
+const CODEX_AUTH_MAP_PATH = process.env.CODEX_AUTH_MAP_PATH || '/home/ubuntu/.openclaw/codex-auth-map.json';
 const UPSTREAM_HOST = 'chatgpt.com';
 const UPSTREAM_PATH_PREFIX = '/backend-api/codex';
 const CONNECT_TIMEOUT_MS = 10000;
@@ -43,72 +45,186 @@ function log(level, msg, extra) {
 
 // --- Token management ---
 
-let cachedToken = null;
-let tokenMtime = 0;
-let lastSuccessfulTokenRead = 0; // epoch ms of last successful auth.json read
-let refreshMutex = null; // Promise when refresh is in-flight
-let circuitOpen = false;
-let circuitOpenUntil = 0;
+let cachedCodexAuthMap = null;
+let cachedCodexAuthMapMtime = 0;
+const codexTokenCache = new Map(); // auth-key -> { token, mtime, lastSuccessfulRead }
+const codexRefreshMutex = new Map(); // auth-key -> Promise
+const codexCircuitState = new Map(); // auth-key -> { openUntil, reason, openedAt }
 const STALE_TOKEN_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+const CODEX_COOLDOWNS_MS = {
+  rate_limit: 15 * 60 * 1000,
+  timeout: 3 * 60 * 1000,
+  upstream_5xx: 3 * 60 * 1000,
+  auth_temporary: 5 * 60 * 1000,
+  auth_permanent: 12 * 60 * 60 * 1000,
+  default: 5 * 60 * 1000,
+};
 
-function readAuthFile() {
+function getCodexState(authKey) {
+  const cached = codexTokenCache.get(authKey);
+  return cached || { token: null, mtime: 0, lastSuccessfulRead: 0 };
+}
+
+function setCodexState(authKey, nextState) {
+  codexTokenCache.set(authKey, nextState);
+}
+
+function getCircuitState(authKey) {
+  const cached = codexCircuitState.get(authKey);
+  return cached || { openUntil: 0, reason: null, openedAt: 0 };
+}
+
+function getCooldownDuration(reason) {
+  return CODEX_COOLDOWNS_MS[reason] || CODEX_COOLDOWNS_MS.default;
+}
+
+function openCircuit(authKey, reason) {
+  const durationMs = getCooldownDuration(reason);
+  codexCircuitState.set(authKey, {
+    openUntil: Date.now() + durationMs,
+    reason: reason || 'default',
+    openedAt: Date.now(),
+  });
+  log('warn', 'Codex candidate moved to cooldown', {
+    authKey,
+    reason: reason || 'default',
+    openUntil: new Date(Date.now() + durationMs).toISOString(),
+  });
+}
+
+function clearCircuit(authKey) {
+  codexCircuitState.set(authKey, { openUntil: 0, reason: null, openedAt: 0 });
+}
+
+function isCircuitOpen(authKey) {
+  return getCircuitState(authKey).openUntil > Date.now();
+}
+
+function normalizeAuthEntry(value, fallback) {
+  const normalizedFallback = Array.isArray(fallback) ? fallback.filter(Boolean) : [fallback].filter(Boolean);
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
+  if (Array.isArray(value)) {
+    const cleaned = value.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim());
+    return cleaned.length > 0 ? cleaned : normalizedFallback;
+  }
+  return normalizedFallback;
+}
+
+function normalizeCodexAuthMap(raw) {
+  const normalized = { default: [LEGACY_CODEX_AUTH_PATH], agents: {} };
+
+  if (raw) {
+    normalized.default = normalizeAuthEntry(raw.default, [LEGACY_CODEX_AUTH_PATH]);
+  }
+
+  if (raw && raw.agents && typeof raw.agents === 'object') {
+    for (const [agentId, authPaths] of Object.entries(raw.agents)) {
+      const normalizedEntry = normalizeAuthEntry(authPaths, []);
+      if (normalizedEntry.length > 0) {
+        normalized.agents[agentId] = normalizedEntry;
+      }
+    }
+  }
+
+  return normalized;
+}
+
+function loadCodexAuthMap() {
   try {
-    const raw = fs.readFileSync(AUTH_PATH, 'utf8');
-    const data = JSON.parse(raw);
-    return data;
+    const stat = fs.statSync(CODEX_AUTH_MAP_PATH);
+    if (cachedCodexAuthMap && stat.mtimeMs === cachedCodexAuthMapMtime) {
+      return cachedCodexAuthMap;
+    }
+    const raw = JSON.parse(fs.readFileSync(CODEX_AUTH_MAP_PATH, 'utf8'));
+    cachedCodexAuthMap = normalizeCodexAuthMap(raw);
+    cachedCodexAuthMapMtime = stat.mtimeMs;
+    return cachedCodexAuthMap;
   } catch (err) {
-    log('error', 'Failed to read auth.json', { error: err.message });
+    if (err.code !== 'ENOENT') {
+      log('warn', 'Failed to read Codex auth map, using legacy default', { error: err.message });
+    }
+    cachedCodexAuthMap = normalizeCodexAuthMap(null);
+    cachedCodexAuthMapMtime = 0;
+    return cachedCodexAuthMap;
+  }
+}
+
+function resolveCodexCandidates(agentId) {
+  const authMap = loadCodexAuthMap();
+  const key = agentId && authMap.agents[agentId] ? agentId : 'default';
+  const authPaths = key === 'default' ? authMap.default : authMap.agents[key];
+  return {
+    agentId: agentId || 'default',
+    selectedKey: key,
+    candidates: authPaths.map((authPath, index) => ({
+      authKey: `${key}#${index}`,
+      authPath,
+      index,
+    })),
+  };
+}
+
+function selectCodexCandidate(codexContext, attemptedKeys) {
+  for (const candidate of codexContext.candidates) {
+    if (attemptedKeys && attemptedKeys.has(candidate.authKey)) continue;
+    if (isCircuitOpen(candidate.authKey)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function readCodexAuthFile(authPath) {
+  try {
+    return JSON.parse(fs.readFileSync(authPath, 'utf8'));
+  } catch (err) {
+    log('error', 'Failed to read Codex auth file', { authPath, error: err.message });
     return null;
   }
 }
 
-function getAccessToken() {
+function getAccessToken(authKey, authPath) {
+  const state = getCodexState(authKey);
   try {
-    const stat = fs.statSync(AUTH_PATH);
+    const stat = fs.statSync(authPath);
     const mtime = stat.mtimeMs;
-    if (cachedToken && mtime === tokenMtime) return cachedToken;
-    const data = readAuthFile();
+    if (state.token && mtime === state.mtime) return state.token;
+    const data = readCodexAuthFile(authPath);
     const tokens = data && data.tokens;
     if (tokens && tokens.access_token) {
-      cachedToken = tokens.access_token;
-      tokenMtime = mtime;
-      lastSuccessfulTokenRead = Date.now();
-      log('info', 'Loaded access token from auth.json');
-      return cachedToken;
+      setCodexState(authKey, {
+        token: tokens.access_token,
+        mtime,
+        lastSuccessfulRead: Date.now(),
+      });
+      log('info', 'Loaded Codex access token', { authKey, authPath });
+      return tokens.access_token;
     }
   } catch (err) {
-    // File read failed — decide severity based on cache state and staleness
-    if (!cachedToken) {
-      throw new Error('Cannot read auth.json and no cached token available: ' + err.message);
+    if (!state.token) {
+      throw new Error(`Cannot read Codex auth file (${authPath}) and no cached token available: ${err.message}`);
     }
-    const staleDuration = Date.now() - lastSuccessfulTokenRead;
-    if (lastSuccessfulTokenRead > 0 && staleDuration > STALE_TOKEN_THRESHOLD_MS) {
-      log('error', 'auth.json unreadable and cached token is stale', {
+    const staleDuration = Date.now() - state.lastSuccessfulRead;
+    if (state.lastSuccessfulRead > 0 && staleDuration > STALE_TOKEN_THRESHOLD_MS) {
+      log('error', 'Codex auth file unreadable and cached token is stale', {
+        authKey,
+        authPath,
         error: err.message,
         lastSuccessfulReadAgo: Math.round(staleDuration / 1000) + 's',
       });
     } else {
-      log('warn', 'auth.json unreadable, using cached token', { error: err.message });
+      log('warn', 'Codex auth file unreadable, using cached token', { authKey, authPath, error: err.message });
     }
   }
-  return cachedToken;
+  return state.token;
 }
 
-function invalidateToken() {
-  cachedToken = null;
-  tokenMtime = 0;
-  // Preserve lastSuccessfulTokenRead so staleness tracking remains accurate
-  // after a 401-triggered invalidation + successful re-read from disk.
-}
-
-// Watch auth.json for external changes (e.g. reprovision)
-try {
-  fs.watch(AUTH_PATH, () => {
-    log('info', 'auth.json changed on disk, invalidating cached token');
-    invalidateToken();
+function invalidateToken(authKey) {
+  const state = getCodexState(authKey);
+  setCodexState(authKey, {
+    token: null,
+    mtime: 0,
+    lastSuccessfulRead: state.lastSuccessfulRead,
   });
-} catch (err) {
-  log('warn', 'Cannot watch auth.json, token reload requires restart', { error: err.message });
 }
 
 // --- Anthropic token management (static key from file, no refresh) ---
@@ -204,20 +320,18 @@ try {
 
 // --- Token refresh ---
 
-function refreshToken() {
-  // Deduplicate concurrent refresh attempts
-  if (refreshMutex) return refreshMutex;
+function refreshToken(authKey, authPath) {
+  if (codexRefreshMutex.has(authKey)) return codexRefreshMutex.get(authKey);
 
-  // Circuit breaker: don't hammer refresh endpoint
-  if (circuitOpen && Date.now() < circuitOpenUntil) {
+  if (isCircuitOpen(authKey)) {
     return Promise.reject(new Error('Circuit breaker open — refresh disabled'));
   }
 
-  refreshMutex = new Promise((resolve, reject) => {
-    const auth = readAuthFile();
+  const refreshPromise = new Promise((resolve, reject) => {
+    const auth = readCodexAuthFile(authPath);
     const tokens = auth && auth.tokens;
     if (!tokens || !tokens.refresh_token) {
-      reject(new Error('No refresh_token in auth.json'));
+      reject(new Error(`No refresh_token in Codex auth file (${authPath})`));
       return;
     }
 
@@ -239,10 +353,8 @@ function refreshToken() {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         if (res.statusCode !== 200) {
-          log('error', 'Token refresh failed', { status: res.statusCode, body: data.slice(0, 500) });
-          // Open circuit breaker for 5 minutes
-          circuitOpen = true;
-          circuitOpenUntil = Date.now() + 5 * 60 * 1000;
+          log('error', 'Codex token refresh failed', { authKey, authPath, status: res.statusCode, body: data.slice(0, 500) });
+          openCircuit(authKey, res.statusCode === 429 ? 'rate_limit' : (res.statusCode >= 500 ? 'upstream_5xx' : 'auth_temporary'));
           reject(new Error(`Refresh returned ${res.statusCode}`));
           return;
         }
@@ -258,12 +370,14 @@ function refreshToken() {
             tokens: updatedTokens,
             last_refresh: new Date().toISOString(),
           });
-          fs.writeFileSync(AUTH_PATH, JSON.stringify(updated, null, 2), 'utf8');
-          cachedToken = parsed.access_token;
-          tokenMtime = fs.statSync(AUTH_PATH).mtimeMs;
-          lastSuccessfulTokenRead = Date.now();
-          circuitOpen = false;
-          log('info', 'Token refreshed successfully');
+          fs.writeFileSync(authPath, JSON.stringify(updated, null, 2), 'utf8');
+          setCodexState(authKey, {
+            token: parsed.access_token,
+            mtime: fs.statSync(authPath).mtimeMs,
+            lastSuccessfulRead: Date.now(),
+          });
+          clearCircuit(authKey);
+          log('info', 'Codex token refreshed successfully', { authKey, authPath });
           resolve(parsed.access_token);
         } catch (err) {
           reject(err);
@@ -272,17 +386,17 @@ function refreshToken() {
     });
 
     req.on('error', (err) => {
-      log('error', 'Token refresh request error', { error: err.message });
-      circuitOpen = true;
-      circuitOpenUntil = Date.now() + 5 * 60 * 1000;
+      log('error', 'Codex token refresh request error', { authKey, authPath, error: err.message });
+      openCircuit(authKey, /timeout/i.test(err.message) ? 'timeout' : 'auth_temporary');
       reject(err);
     });
     req.on('timeout', () => { req.destroy(new Error('Refresh request timeout')); });
     req.write(body);
     req.end();
-  }).finally(() => { refreshMutex = null; });
+  }).finally(() => { codexRefreshMutex.delete(authKey); });
 
-  return refreshMutex;
+  codexRefreshMutex.set(authKey, refreshPromise);
+  return refreshPromise;
 }
 
 // --- Proxy logic ---
@@ -305,8 +419,72 @@ function bufferBody(req) {
   });
 }
 
-function proxyRequest(clientReq, clientRes, body, token, isRetry) {
-  const upstreamPath = UPSTREAM_PATH_PREFIX + clientReq.url;
+function parseCodexRequest(urlPath) {
+  const match = urlPath.match(/^\/codex\/([^/]+)(\/.*)?$/);
+  if (match) {
+    return {
+      agentId: match[1],
+      upstreamPath: match[2] || '/',
+    };
+  }
+  return {
+    agentId: null,
+    upstreamPath: urlPath,
+  };
+}
+
+function classifyCodexFailure(statusCode, err) {
+  if (statusCode === 429) return 'rate_limit';
+  if (statusCode >= 500) return 'upstream_5xx';
+  if (err && /timeout/i.test(err.message || '')) return 'timeout';
+  return 'auth_temporary';
+}
+
+function proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, isRetry) {
+  const candidate = selectCodexCandidate(codexContext, attemptedKeys);
+  if (!candidate) {
+    clientRes.writeHead(503, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({
+      error: 'no_healthy_codex_account',
+      detail: `No healthy Codex auth candidate available for '${codexContext.agentId}'`,
+    }));
+    return;
+  }
+
+  let token;
+  try {
+    token = getAccessToken(candidate.authKey, candidate.authPath);
+  } catch (err) {
+    if (!attemptedKeys.has(candidate.authKey)) {
+      attemptedKeys.add(candidate.authKey);
+      openCircuit(candidate.authKey, 'auth_temporary');
+      log('warn', 'Codex auth fallback after token read failure', {
+        agent: codexContext.agentId,
+        authKey: candidate.authKey,
+        error: err.message,
+      });
+      proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, false);
+      return;
+    }
+    clientRes.writeHead(503, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({ error: 'no_token', detail: err.message }));
+    return;
+  }
+
+  if (!token) {
+    attemptedKeys.add(candidate.authKey);
+    openCircuit(candidate.authKey, 'auth_temporary');
+    proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, false);
+    return;
+  }
+
+  log('info', 'Codex auth selected', {
+    agent: codexContext.agentId,
+    authKey: candidate.authKey,
+    authPath: candidate.authPath,
+  });
+
+  const upstreamPath = UPSTREAM_PATH_PREFIX + codexContext.upstreamPath;
   const headers = Object.assign({}, clientReq.headers);
   delete headers.host;
   headers.host = UPSTREAM_HOST;
@@ -327,15 +505,36 @@ function proxyRequest(clientReq, clientRes, body, token, isRetry) {
     if (upRes.statusCode === 401 && !isRetry) {
       // Drain upstream response
       upRes.resume();
-      log('warn', 'Upstream returned 401, attempting token refresh');
-      invalidateToken();
-      refreshToken().then((newToken) => {
-        proxyRequest(clientReq, clientRes, body, newToken, true);
+      log('warn', 'Codex upstream returned 401, attempting token refresh', { authKey: candidate.authKey, agent: codexContext.agentId });
+      invalidateToken(candidate.authKey);
+      refreshToken(candidate.authKey, candidate.authPath).then(() => {
+        proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, true);
       }).catch((err) => {
-        log('error', 'Token refresh failed on 401 retry', { error: err.message });
-        clientRes.writeHead(502, { 'Content-Type': 'application/json' });
-        clientRes.end(JSON.stringify({ error: 'token_refresh_failed', detail: err.message }));
+        attemptedKeys.add(candidate.authKey);
+        openCircuit(candidate.authKey, 'auth_temporary');
+        log('warn', 'Codex auth fallback after refresh failure', {
+          agent: codexContext.agentId,
+          fromAuthKey: candidate.authKey,
+          reason: 'auth_temporary',
+          error: err.message,
+        });
+        proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, false);
       });
+      return;
+    }
+
+    if ((upRes.statusCode === 429 || upRes.statusCode >= 500) && !clientRes.headersSent) {
+      const reason = classifyCodexFailure(upRes.statusCode);
+      upRes.resume();
+      attemptedKeys.add(candidate.authKey);
+      openCircuit(candidate.authKey, reason);
+      log('warn', 'Codex auth fallback', {
+        agent: codexContext.agentId,
+        fromAuthKey: candidate.authKey,
+        reason,
+        status: upRes.statusCode,
+      });
+      proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, false);
       return;
     }
 
@@ -370,10 +569,17 @@ function proxyRequest(clientReq, clientRes, body, token, isRetry) {
   });
 
   upReq.on('error', (err) => {
-    log('error', 'Upstream request error', { error: err.message, path: upstreamPath });
+    const reason = classifyCodexFailure(null, err);
+    log('error', 'Codex upstream request error', { error: err.message, path: upstreamPath, authKey: candidate.authKey, agent: codexContext.agentId });
     if (!clientRes.headersSent) {
-      clientRes.writeHead(502, { 'Content-Type': 'application/json' });
-      clientRes.end(JSON.stringify({ error: 'upstream_error', detail: err.message }));
+      attemptedKeys.add(candidate.authKey);
+      openCircuit(candidate.authKey, reason);
+      log('warn', 'Codex auth fallback', {
+        agent: codexContext.agentId,
+        fromAuthKey: candidate.authKey,
+        reason,
+      });
+      proxyRequest(clientReq, clientRes, body, codexContext, attemptedKeys, false);
     }
   });
 
@@ -538,17 +744,55 @@ function proxyGitHubRequest(clientReq, clientRes) {
 const server = http.createServer((req, res) => {
   // Health check — per-service status
   if (req.url === '/health' && req.method === 'GET') {
-    let codexToken = null;
-    try { codexToken = getAccessToken(); } catch (err) { /* no cached token — codex unhealthy */ }
+    const codexAuthMap = loadCodexAuthMap();
+    const codexStatus = {};
+
+    const defaultTargets = resolveCodexCandidates(null);
+    codexStatus.default = defaultTargets.candidates.map((candidate) => {
+      let token = null;
+      try { token = getAccessToken(candidate.authKey, candidate.authPath); } catch (err) { /* candidate unhealthy */ }
+      const circuit = getCircuitState(candidate.authKey);
+      return {
+        authKey: candidate.authKey,
+        authPath: candidate.authPath,
+        hasToken: !!token,
+        healthy: !!token && !isCircuitOpen(candidate.authKey),
+        circuitOpen: isCircuitOpen(candidate.authKey),
+        circuitReason: circuit.reason,
+        circuitOpenUntil: isCircuitOpen(candidate.authKey) ? new Date(circuit.openUntil).toISOString() : null,
+      };
+    });
+
+    for (const agentId of Object.keys(codexAuthMap.agents)) {
+      const targets = resolveCodexCandidates(agentId);
+      codexStatus[agentId] = targets.candidates.map((candidate) => {
+        let token = null;
+        try { token = getAccessToken(candidate.authKey, candidate.authPath); } catch (err) { /* per-agent auth unhealthy */ }
+        const circuit = getCircuitState(candidate.authKey);
+        return {
+          authKey: candidate.authKey,
+          authPath: candidate.authPath,
+          hasToken: !!token,
+          healthy: !!token && !isCircuitOpen(candidate.authKey),
+          circuitOpen: isCircuitOpen(candidate.authKey),
+          circuitReason: circuit.reason,
+          circuitOpenUntil: isCircuitOpen(candidate.authKey) ? new Date(circuit.openUntil).toISOString() : null,
+        };
+      });
+    }
+
     const anthropicToken = getAnthropicToken();
     const githubAgents = getGitHubAgents();
-    const codexHealthy = !!codexToken && !circuitOpen;
+    const codexHealthy = Object.values(codexStatus).some((entries) => Array.isArray(entries) && entries.some((entry) => entry.healthy));
     const anthropicHealthy = !!anthropicToken;
     const healthy = codexHealthy || anthropicHealthy || githubAgents.length > 0;
     res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: healthy ? 'healthy' : 'unhealthy',
-      codex: { hasToken: !!codexToken, healthy: codexHealthy, circuitOpen, circuitOpenUntil: circuitOpen ? new Date(circuitOpenUntil).toISOString() : null },
+      codex: {
+        healthy: codexHealthy,
+        accounts: codexStatus,
+      },
       anthropic: { hasToken: !!anthropicToken, healthy: anthropicHealthy, authMethod: anthropicToken && anthropicToken.startsWith('sk-ant-oat') ? 'bearer' : 'api-key' },
       github: { agents: githubAgents, hasTokens: githubAgents.length > 0 },
     }));
@@ -576,22 +820,15 @@ const server = http.createServer((req, res) => {
   }
 
   // Default: Codex route
-  let token;
-  try {
-    token = getAccessToken();
-  } catch (err) {
-    res.writeHead(503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'no_token', detail: err.message }));
-    return;
-  }
-  if (!token) {
-    res.writeHead(503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'no_token', detail: 'Cannot read access token from auth.json' }));
-    return;
-  }
+  const codexRequest = parseCodexRequest(req.url);
+  const codexContext = resolveCodexCandidates(codexRequest.agentId);
 
   bufferBody(req).then((body) => {
-    proxyRequest(req, res, body, token, false);
+    proxyRequest(req, res, body, {
+      agentId: codexContext.agentId,
+      candidates: codexContext.candidates,
+      upstreamPath: codexRequest.upstreamPath,
+    }, new Set(), false);
   }).catch((err) => {
     log('error', 'Failed to buffer request body', { error: err.message });
     if (!res.headersSent) {
@@ -603,7 +840,14 @@ const server = http.createServer((req, res) => {
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   log('info', 'MCP auth proxy started', { host: LISTEN_HOST, port: LISTEN_PORT });
-  try { getAccessToken(); } catch (err) { log('warn', 'auth.json not available at startup', { error: err.message }); }
+  const defaultTargets = resolveCodexCandidates(null);
+  if (defaultTargets.candidates[0]) {
+    try {
+      getAccessToken(defaultTargets.candidates[0].authKey, defaultTargets.candidates[0].authPath);
+    } catch (err) {
+      log('warn', 'Default Codex auth not available at startup', { authPath: defaultTargets.candidates[0].authPath, error: err.message });
+    }
+  }
   getAnthropicToken();
 });
 

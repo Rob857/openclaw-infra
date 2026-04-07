@@ -359,6 +359,31 @@
         mode: "0600"
       no_log: true
 
+- name: Deploy additional Codex auth profile files
+  when: codex_auth_profiles | default({}) | length > 0
+  block:
+    - name: Ensure .codex directory exists for additional profiles
+      ansible.builtin.file:
+        path: /home/ubuntu/.codex
+        state: directory
+        mode: "0700"
+
+    - name: Write Codex auth profile files
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: "/home/ubuntu/.codex/{{ item.key }}"
+        mode: "0600"
+      loop: "{{ codex_auth_profiles | dict2items }}"
+      no_log: true
+
+- name: Write Codex auth map file
+  ansible.builtin.copy:
+    content: "{{ codex_auth_map_json }}"
+    dest: /home/ubuntu/.openclaw/codex-auth-map.json
+    mode: "0600"
+  no_log: true
+  when: codex_auth_map_json | default('') | length > 0
+
 - name: Verify codex auth.json is a regular file (not a directory)
   ansible.builtin.stat:
     path: /home/ubuntu/.codex/auth.json
@@ -386,7 +411,10 @@
   ansible.builtin.set_fact:
     proxy_required: >-
       {%- set ns = namespace(found=false) -%}
-      {%- if (codex_auth_json | default('') | length > 0) or (claude_setup_token | default('') | length > 0) -%}
+      {%- if (codex_auth_json | default('') | length > 0)
+            or (codex_auth_profiles | default({}) | length > 0)
+            or (codex_auth_map_json | default('') | length > 0)
+            or (claude_setup_token | default('') | length > 0) -%}
         {%- set ns.found = true -%}
       {%- else -%}
         {%- for srv in _openclaw_mcp_servers | selectattr('type', 'equalto', 'github') -%}
