@@ -160,3 +160,45 @@ Expose candidate-level health, not just one auth path per agent.
 - automatic fallback works on rate limits / temp failures
 - no token leakage in logs
 - rollout can be enabled gradually per agent
+
+---
+
+## 2026-04-08 — current live special state on VPS
+
+This is the pragmatic live setup Rob currently wants preserved. It is **not** the broad multi-account rollout for every agent.
+
+### Effective live account routing
+- `main` / Sanji
+  - model: `openai-codex/gpt-5.4`
+  - account chain: `selenka@mapletics.com` only
+- `manfred`
+  - model: `openai-codex/gpt-5.4`
+  - account chain: `rbeyer1@smail.uni-koeln.de` only
+- `barney`
+  - model: `openai-codex/gpt-5.4`
+  - account chain: `selenka@mapletics.com` only
+- `claudia`
+  - model: `openai-codex/gpt-5.4`
+  - account chain: `selenka@mapletics.com` only
+- `gordon`
+  - model: `openai-codex/gpt-5.4-mini`
+  - model fallbacks: `openrouter/free`
+  - account chain:
+    1. `rbeyer1@smail.uni-koeln.de`
+    2. `sanjicook803@gmail.com`
+    3. `info@mapletics.com`
+
+### Auth file handling
+Keep human-readable aliases under `~/.codex/profiles/` so Rob can switch accounts manually without hunting through per-agent files.
+
+Expected alias files:
+- `auth-selenka.json`
+- `auth-rbeyer1.json`
+- `auth-sanjicook803.json`
+- `auth-info.json`
+
+Also keep a deduplicated catalog of unique snapshots under:
+- `~/.codex/profile-catalog/`
+
+### Important note
+The repo source-of-truth was previously moved toward broad per-agent 5-slot multi-account fallback. The live VPS was later simplified for stability. Future deploys should not blindly restore the old broad fallback layout without checking Rob first.
