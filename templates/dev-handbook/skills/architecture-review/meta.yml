@@ -1,0 +1,15 @@
+id: architecture-review
+name: Architecture Review
+summary: Review Flutter app changes for layer boundaries, patterns, and backend migration readiness.
+category: review
+owners:
+  - robin
+used_by:
+  - claudia
+repo: Claw_Memory_Skills
+path: skills/architecture-review/SKILL.md
+source_of_truth: true
+tags:
+  - flutter
+  - architecture
+  - review

@@ -37,6 +37,46 @@
     state: directory
     mode: "0755"
 
+- name: Ensure shared skills checkout root exists
+  ansible.builtin.file:
+    path: "{{ shared_skills_checkout_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Remove deployed shared skills tree before refresh
+  ansible.builtin.file:
+    path: "{{ shared_skills_checkout_path }}/skills"
+    state: absent
+
+- name: Deploy shared skills from canonical local checkout
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../Claw_Memory_Skills/skills/"
+    dest: "{{ shared_skills_checkout_path }}/skills/"
+
+- name: Ensure dev-handbook compatibility symlink points to shared skills checkout
+  ansible.builtin.shell: |
+    set -euo pipefail
+    TARGET="{{ shared_skills_checkout_path }}"
+    LINK="{{ shared_skills_compat_path }}"
+
+    if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$TARGET" ]; then
+      echo "OK"
+      exit 0
+    fi
+
+    if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+      mv "$LINK" "${LINK}.pre-claw-memory-skills"
+    else
+      rm -f "$LINK"
+    fi
+
+    ln -s "$TARGET" "$LINK"
+    echo "UPDATED"
+  args:
+    executable: /bin/bash
+  register: dev_handbook_link
+  changed_when: "'UPDATED' in dev_handbook_link.stdout"
+
 # Per-workspace setup (deploy key, SSH config, git repo, sync script, systemd units)
 - name: Install deploy keys
   ansible.builtin.copy:
@@ -169,6 +209,67 @@
     mode: "0644"
   when: item.stat.exists and item.stat.isdir
   loop: "{{ workspace_dirs.results }}"
+  loop_control:
+    label: "{{ item.item.agent_id }}"
+
+- name: Ensure main workspace skills link points to shared registry
+  ansible.builtin.shell: |
+    set -euo pipefail
+    TARGET="{{ shared_skills_checkout_path }}/skills"
+    LINK="{{ shared_skills_main_workspace_link }}"
+
+    if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$TARGET" ]; then
+      echo "OK"
+      exit 0
+    fi
+
+    if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+      mv "$LINK" "${LINK}.pre-claw-memory-skills"
+    else
+      rm -f "$LINK"
+    fi
+
+    ln -s "$TARGET" "$LINK"
+    echo "UPDATED"
+  args:
+    executable: /bin/bash
+  register: main_workspace_skills_link
+  changed_when: "'UPDATED' in main_workspace_skills_link.stdout"
+
+- name: Build specialist workspace wrapper targets
+  ansible.builtin.set_fact:
+    _specialist_wrapper_targets: "{{ (_specialist_wrapper_targets | default([])) + [_entry] }}"
+  vars:
+    _wrapper_map:
+      barney: "barney-SKILL.md"
+      claudia: "claudia-SKILL.md"
+      gordon: "gordon-SKILL.md"
+      manfred: "manfred-SKILL.md"
+    _entry:
+      agent_id: "{{ item.id }}"
+      workspace_dir: "{{ '/home/ubuntu/.openclaw/workspace' if item.id == 'main' else '/home/ubuntu/.openclaw/workspace-' ~ item.id }}"
+      wrapper_template: "{{ _wrapper_map[item.id] }}"
+  when: item.id in _wrapper_map
+  loop: "{{ openclaw_agents }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Check specialist workspace directories before installing wrappers
+  ansible.builtin.stat:
+    path: "{{ item.workspace_dir }}"
+  register: specialist_wrapper_workspace_dirs
+  loop: "{{ _specialist_wrapper_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.agent_id }}"
+
+- name: Install shared skill wrappers into specialist workspaces
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../templates/dev-handbook/workspace-wrappers/{{ item.item.wrapper_template }}"
+    dest: "{{ item.item.workspace_dir }}/SKILL.md"
+    mode: "0644"
+  when:
+    - item.stat.exists and item.stat.isdir
+  loop: "{{ specialist_wrapper_workspace_dirs.results }}"
   loop_control:
     label: "{{ item.item.agent_id }}"
 

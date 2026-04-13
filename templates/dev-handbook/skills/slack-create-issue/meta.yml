@@ -1,0 +1,15 @@
+id: slack-create-issue
+name: Slack Create Issue
+summary: Handle Slack-driven issue creation or team routing flows for the Gordon agent.
+category: collaboration
+owners:
+  - robin
+used_by:
+  - gordon
+repo: Claw_Memory_Skills
+path: skills/slack-create-issue/SKILL.md
+source_of_truth: true
+tags:
+  - slack
+  - collaboration
+  - issue-triage

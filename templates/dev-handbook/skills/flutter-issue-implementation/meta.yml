@@ -1,0 +1,18 @@
+id: flutter-issue-implementation
+name: Flutter Issue Implementation
+summary: Implement GitHub issues for the Mapletics Flutter app and route the result through review workflows.
+category: implementation
+owners:
+  - robin
+used_by:
+  - manfred
+repo: Claw_Memory_Skills
+path: skills/flutter-issue-implementation/SKILL.md
+source_of_truth: true
+depends_on:
+  - architecture-review
+  - flutter-code-review
+tags:
+  - flutter
+  - implementation
+  - github

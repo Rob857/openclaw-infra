@@ -1,0 +1,15 @@
+id: flutter-code-review
+name: Flutter Code Review
+summary: Review Flutter and Dart changes for correctness, side effects, and architecture compliance.
+category: review
+owners:
+  - robin
+used_by:
+  - barney
+repo: Claw_Memory_Skills
+path: skills/flutter-code-review/SKILL.md
+source_of_truth: true
+tags:
+  - flutter
+  - code-review
+  - quality

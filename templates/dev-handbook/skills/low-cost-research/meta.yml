@@ -1,0 +1,15 @@
+id: low-cost-research
+name: Low Cost Research
+summary: Run bounded lower-cost investigation and research workflows with clear escalation boundaries.
+category: research
+owners:
+  - robin
+used_by:
+  - deepseek-agent
+repo: Claw_Memory_Skills
+path: skills/low-cost-research/SKILL.md
+source_of_truth: true
+tags:
+  - research
+  - deepseek
+  - cost-optimized

@@ -56,6 +56,11 @@ mission_control_expose_via_tailscale: false
 mission_control_serve_path: "/mission-control"
 force_mission_control_rebuild: false
 
+# Shared skills registry (canonical source: local Claw_Memory_Skills checkout)
+shared_skills_checkout_path: "/home/ubuntu/repos/Claw_Memory_Skills"
+shared_skills_compat_path: "/home/ubuntu/dev-handbook"
+shared_skills_main_workspace_link: "/home/ubuntu/.openclaw/workspace/skills"
+
 # Voice transcription (Groq Whisper)
 # Set via: pulumi config set groqApiKey --secret
 openclaw_audio_provider: "groq"

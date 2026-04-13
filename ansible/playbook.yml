@@ -160,6 +160,42 @@
       when: openclaw_obsidian_github_tokens is not defined
       tags: [always]
 
+    - name: Build required shared Claw Memory Skills list
+      ansible.builtin.set_fact:
+        _required_claw_memory_skills: >-
+          {{
+            []
+            + (['skills/architecture-review/SKILL.md'] if 'claudia' in (openclaw_agents | map(attribute='id') | list) else [])
+            + (['skills/flutter-code-review/SKILL.md'] if 'barney' in (openclaw_agents | map(attribute='id') | list) else [])
+            + (['skills/flutter-issue-implementation/SKILL.md'] if 'manfred' in (openclaw_agents | map(attribute='id') | list) else [])
+            + (['skills/slack-create-issue/SKILL.md'] if 'gordon' in (openclaw_agents | map(attribute='id') | list) else [])
+          }}
+      tags: [always]
+
+    - name: Check required shared Claw Memory Skills exist in repo
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../Claw_Memory_Skills/{{ item }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ _required_claw_memory_skills }}"
+      loop_control:
+        label: "{{ item }}"
+      register: claw_memory_skill_stats
+      tags: [always]
+
+    - name: Assert required shared Claw Memory Skills exist in repo
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: >-
+          Required shared Claw Memory Skills entry is missing: {{ playbook_dir }}/../../Claw_Memory_Skills/{{ item.item }}.
+          Add the skill under Claw_Memory_Skills before provisioning these agents.
+        quiet: true
+      loop: "{{ claw_memory_skill_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags: [always]
+
   roles:
     - { role: system,    tags: [system],    become: true }
     - { role: docker,    tags: [docker],    become: true }
@@ -200,7 +236,7 @@
     - { role: sandbox,   tags: [sandbox] }
     - role: workspace
       tags: [workspace]
-      when: _openclaw_workspaces | selectattr('repo_url', 'ne', '') | selectattr('deploy_key', 'ne', '') | list | length > 0
+      when: openclaw_agents | default([]) | length > 0
 
   post_tasks:
     - name: Ensure openclaw-gateway is started and enabled

@@ -1,0 +1,15 @@
+id: operator-orchestrator
+name: Operator Orchestrator
+summary: Coordinate multi-agent work, triage operational tasks, and act as the top-level operator workflow.
+category: orchestration
+owners:
+  - robin
+used_by:
+  - main
+repo: Claw_Memory_Skills
+path: skills/operator-orchestrator/SKILL.md
+source_of_truth: true
+tags:
+  - orchestration
+  - operator
+  - coordination
