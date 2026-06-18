@@ -236,6 +236,12 @@
   register: main_workspace_skills_link
   changed_when: "'UPDATED' in main_workspace_skills_link.stdout"
 
+- name: Install Sanji workspace soul
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../Claw_Memory_Skills/agent/SOUL.md"
+    dest: "/home/ubuntu/.openclaw/workspace/SOUL.md"
+    mode: "0644"
+
 - name: Build specialist workspace wrapper targets
   ansible.builtin.set_fact:
     _specialist_wrapper_targets: "{{ (_specialist_wrapper_targets | default([])) + [_entry] }}"
@@ -247,7 +253,7 @@
       manfred: "manfred-SKILL.md"
     _entry:
       agent_id: "{{ item.id }}"
-      workspace_dir: "{{ '/home/ubuntu/.openclaw/workspace' if item.id == 'main' else '/home/ubuntu/.openclaw/workspace-' ~ item.id }}"
+      workspace_dir: "{{ '/home/ubuntu/.openclaw/agents/gordon/workspace' if item.id == 'gordon' else ('/home/ubuntu/.openclaw/workspace' if item.id == 'main' else '/home/ubuntu/.openclaw/workspace-' ~ item.id) }}"
       wrapper_template: "{{ _wrapper_map[item.id] }}"
   when: item.id in _wrapper_map
   loop: "{{ openclaw_agents }}"
@@ -269,6 +275,18 @@
     mode: "0644"
   when:
     - item.stat.exists and item.stat.isdir
+  loop: "{{ specialist_wrapper_workspace_dirs.results }}"
+  loop_control:
+    label: "{{ item.item.agent_id }}"
+
+- name: Install Gordon workspace soul
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../templates/dev-handbook/workspace-wrappers/gordon-SOUL.md"
+    dest: "{{ item.item.workspace_dir }}/SOUL.md"
+    mode: "0644"
+  when:
+    - item.stat.exists and item.stat.isdir
+    - item.item.agent_id == "gordon"
   loop: "{{ specialist_wrapper_workspace_dirs.results }}"
   loop_control:
     label: "{{ item.item.agent_id }}"

@@ -142,6 +142,71 @@
     line: 'export PATH="$HOME/.npm-global/bin:$PATH"'
     state: present
 
+- name: Initialize Codex auth profiles
+  ansible.builtin.set_fact:
+    codex_auth_profiles: []
+
+- name: Add legacy default Codex auth profile
+  ansible.builtin.set_fact:
+    codex_auth_profiles: "{{ codex_auth_profiles + [_profile] }}"
+  vars:
+    _profile:
+      agent_id: "default"
+      auth_key: "default"
+      auth_path: "/home/ubuntu/.codex/auth.json"
+      auth_json: "{{ codex_auth_json }}"
+  when: codex_auth_json | default('') | length > 0
+
+- name: Normalize Codex account definitions
+  ansible.builtin.set_fact:
+    codex_account_entries: "{{ openclaw_codex_accounts | default({}) | dict2items }}"
+
+- name: Validate per-agent Codex auth account IDs
+  ansible.builtin.assert:
+    that:
+      - item.key in (openclaw_agents | map(attribute='id') | list)
+    fail_msg: >-
+      Codex account mapping '{{ item.key }}' does not match any configured agent.
+      Valid agent IDs: {{ openclaw_agents | map(attribute='id') | list }}
+    quiet: true
+  loop: "{{ openclaw_codex_accounts | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Add per-agent Codex auth profiles
+  ansible.builtin.set_fact:
+    codex_auth_profiles: >-
+      {%- set profiles = codex_auth_profiles | default([]) -%}
+      {%- for item in codex_account_entries -%}
+      {%- set raw = item.value -%}
+      {%- if raw is mapping and raw.auth_jsons is defined -%}
+      {%-   set auth_jsons = raw.auth_jsons -%}
+      {%- elif raw is mapping and raw.auth_json is defined -%}
+      {%-   set auth_jsons = [raw.auth_json] -%}
+      {%- else -%}
+      {%-   set auth_jsons = [raw] -%}
+      {%- endif -%}
+      {%- for auth_json in auth_jsons if auth_json | default('') | string | trim | length > 0 -%}
+      {%-   set _ = profiles.append({
+            'agent_id': item.key,
+            'auth_key': item.key ~ '#' ~ loop.index0,
+            'auth_path': (
+              '/home/ubuntu/.codex/auth-shared-' ~ loop.index0 ~ '.json'
+              if (openclaw_codex_auth_mode | default('shared')) == 'shared'
+              else '/home/ubuntu/.codex/auth-' ~ item.key ~ '-' ~ loop.index0 ~ '.json'
+            ),
+            'auth_json': auth_json
+          }) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ profiles }}
+
+- name: Derive Codex auth facts
+  ansible.builtin.set_fact:
+    codex_enabled: "{{ codex_auth_profiles | length > 0 }}"
+    codex_has_default_auth: "{{ codex_auth_profiles | selectattr('agent_id', 'equalto', 'default') | list | length > 0 }}"
+    codex_agent_auth_ids: "{{ codex_auth_profiles | rejectattr('agent_id', 'equalto', 'default') | map(attribute='agent_id') | list }}"
+
 - name: Determine which npm packages to install
   ansible.builtin.set_fact:
     mcp_npm_packages: >-
@@ -149,7 +214,7 @@
          | reject('equalto', '@openai/codex')
          | reject('equalto', 'node-exec-mcp')
          | list
-         + (['@openai/codex'] if (codex_auth_json | default('') | length > 0) else [])
+         + (['@openai/codex'] if (codex_enabled | bool) else [])
          + (['node-exec-mcp'] if (node_exec_enabled | default(false)) else []) }}
 
 - name: Install MCP server npm packages globally
@@ -325,6 +390,31 @@
   ansible.builtin.set_fact:
     npm_prefix_bin: "{{ (npm_prefix.stdout_lines | last) | trim }}/bin"
 
+- name: Ensure custom MCP helper bin directory exists
+  ansible.builtin.file:
+    path: /home/ubuntu/.openclaw/bin
+    state: directory
+    mode: "0755"
+
+- name: Deploy shared Google Drive MCP helper
+  ansible.builtin.template:
+    src: gdrive-gordon-mcp.js.j2
+    dest: /home/ubuntu/.openclaw/bin/gdrive-read-mcp.js
+    mode: "0755"
+  when: >
+    (gdrive_gordon_enabled | default(false) | bool)
+    or
+    (gdrive_main_enabled | default(false) | bool)
+  notify: restart openclaw-gateway
+
+- name: Deploy shared Gmail MCP helper
+  ansible.builtin.template:
+    src: gmail-main-mcp.js.j2
+    dest: /home/ubuntu/.openclaw/bin/gmail-readsend-mcp.js
+    mode: "0755"
+  when: gmail_main_enabled | default(false) | bool
+  notify: restart openclaw-gateway
+
 - name: Resolve node-exec-mcp binary path
   ansible.builtin.shell: |
     set -euo pipefail
@@ -344,7 +434,7 @@
     - _openclaw_mcp_servers | selectattr('type', 'equalto', 'node-exec') | list | length > 0
 
 - name: Deploy Codex auth credentials
-  when: codex_auth_json | default('') | length > 0
+  when: codex_enabled | bool
   block:
     - name: Ensure .codex directory exists
       ansible.builtin.file:
@@ -352,18 +442,37 @@
         state: directory
         mode: "0700"
 
-    - name: Write Codex auth.json
+    - name: Write Codex auth profile files
       ansible.builtin.copy:
-        content: "{{ codex_auth_json }}"
-        dest: /home/ubuntu/.codex/auth.json
+        content: "{{ item.auth_json }}"
+        dest: "{{ item.auth_path }}"
         mode: "0600"
       no_log: true
+      loop: "{{ codex_auth_profiles }}"
+      loop_control:
+        label: "{{ item.auth_path }}"
+
+    - name: Template Codex auth map for proxy routing
+      ansible.builtin.copy:
+        content: |
+          {
+            "default": {{ (codex_auth_profiles | selectattr('agent_id', 'equalto', 'default') | map(attribute='auth_path') | list) | to_json }},
+            "agents": {
+          {%- set agent_ids = codex_auth_profiles | rejectattr('agent_id', 'equalto', 'default') | map(attribute='agent_id') | unique | list -%}
+          {%- for agent_id in agent_ids %}
+            {%- set agent_paths = (codex_auth_profiles | rejectattr('agent_id', 'equalto', 'default') | map(attribute='auth_path') | unique | list) if (openclaw_codex_auth_mode | default('shared')) == 'shared' else (codex_auth_profiles | selectattr('agent_id', 'equalto', agent_id) | map(attribute='auth_path') | list) -%}
+              {{ agent_id | to_json }}: {{ agent_paths | to_json }}{{ "," if not loop.last else "" }}
+          {%- endfor %}
+            }
+          }
+        dest: /home/ubuntu/.openclaw/codex-auth-map.json
+        mode: "0600"
 
 - name: Verify codex auth.json is a regular file (not a directory)
   ansible.builtin.stat:
     path: /home/ubuntu/.codex/auth.json
   register: codex_auth_stat
-  when: codex_auth_json | default('') | length > 0
+  when: codex_has_default_auth | bool
 
 - name: Fail if auth.json is a directory (Docker -v corruption)
   ansible.builtin.assert:
@@ -372,7 +481,7 @@
       /home/ubuntu/.codex/auth.json is a directory, not a file.
       This is likely caused by a previous Docker bind mount when the file
       did not exist. Remove it with: rm -rf /home/ubuntu/.codex/auth.json
-  when: codex_auth_json | default('') | length > 0 and codex_auth_stat.stat.exists
+  when: codex_has_default_auth | bool and codex_auth_stat.stat.exists
 
 - name: Write Anthropic auth token file for proxy
   ansible.builtin.copy:
@@ -386,7 +495,7 @@
   ansible.builtin.set_fact:
     proxy_required: >-
       {%- set ns = namespace(found=false) -%}
-      {%- if (codex_auth_json | default('') | length > 0) or (claude_setup_token | default('') | length > 0) -%}
+      {%- if (codex_enabled | bool) or (claude_setup_token | default('') | length > 0) -%}
         {%- set ns.found = true -%}
       {%- else -%}
         {%- for srv in _openclaw_mcp_servers | selectattr('type', 'equalto', 'github') -%}
@@ -561,9 +670,16 @@
 - name: Template Codex config.toml for proxy routing
   ansible.builtin.template:
     src: codex-config.toml.j2
-    dest: /home/ubuntu/.openclaw/codex-config.toml
+    dest: "/home/ubuntu/.openclaw/codex-config-{{ item.agent_id }}.toml"
     mode: "0644"
-  when: codex_auth_json | default('') | length > 0
+  vars:
+    codex_route_prefix: "/codex/{{ item.agent_id }}"
+  loop: "{{ _openclaw_mcp_servers | selectattr('type', 'equalto', 'codex') | list }}"
+  loop_control:
+    label: "{{ item.agent_id }}"
+  when:
+    - codex_enabled | bool
+    - codex_has_default_auth | bool or item.agent_id in codex_agent_auth_ids
 
 - name: Flush handlers to ensure proxy is restarted before image build
   ansible.builtin.meta: flush_handlers
@@ -748,7 +864,9 @@
   loop: "{{ _openclaw_mcp_servers | selectattr('type', 'equalto', 'codex') | list }}"
   loop_control:
     label: "{{ item.name }}"
-  when: codex_auth_json | default('') | length > 0
+  when:
+    - codex_enabled | bool
+    - codex_has_default_auth | bool or item.agent_id in codex_agent_auth_ids
 
 - name: Ensure agent workspace directories exist for Claude Code containers
   ansible.builtin.file:
@@ -771,7 +889,7 @@
   when: claude_setup_token | default('') | length > 0
 
 - name: Build Codex MCP Docker image
-  when: codex_auth_json | default('') | length > 0
+  when: codex_enabled | bool
   block:
     - name: Check if Codex MCP image exists
       ansible.builtin.command: "docker image inspect \"{{ openclaw_mcp_adapter.codex_docker_image }}\""
@@ -1196,14 +1314,35 @@
     fi
     {% endfor %}
 
+    # Custom stdio servers — explicit opt-in for deployment-specific connectors
+    {% for srv in _openclaw_mcp_servers | selectattr('type', 'equalto', 'custom-stdio') %}
+    SERVERS=$(echo "$SERVERS" | jq \
+        --arg name "{{ srv.name }}" \
+        --arg cmd "{{ srv.command }}" \
+        --argjson args '{{ srv.args | default([]) | to_json }}' \
+        --argjson env '{{ srv.env | default({}) | to_json }}' \
+        '. + [{name: $name, transport: "stdio", command: $cmd, args: $args, env: $env}]')
+    {% endfor %}
+
+    # Custom HTTP servers — explicit opt-in for deployment-specific connectors
+    {% for srv in _openclaw_mcp_servers | selectattr('type', 'equalto', 'custom-http') %}
+    SERVERS=$(echo "$SERVERS" | jq \
+        --arg name "{{ srv.name }}" \
+        --arg url "{{ srv.url }}" \
+        --argjson allowPrivateUrls '{{ srv.allow_private_urls | default(false) | to_json }}' \
+        --argjson timeout '{{ srv.timeout | default(300000) | to_json }}' \
+        '. + [{name: $name, transport: "http", url: $url, allowPrivateUrls: $allowPrivateUrls, timeout: $timeout}]')
+    {% endfor %}
+
     # Codex servers — containerized with docker run -i (stdio piped through Docker)
     # Security: containers have NO credentials. Auth is injected by mcp-auth-proxy (formerly codex-token-proxy)
     # running on codex-proxy-net. Sandbox containers on default bridge cannot reach proxy.
     CODEX_IMAGE="{{ openclaw_mcp_adapter.codex_docker_image }}"
     CODEX_MEM="{{ openclaw_mcp_adapter.codex_memory_limit | default('2g') }}"
     PROXY_GW="{{ codex_proxy_gateway_ip | default('') }}"
-    if [ -f "/home/ubuntu/.codex/auth.json" ] && [ -n "$PROXY_GW" ]; then
+    if [ "{{ '1' if (codex_enabled | bool) else '0' }}" = "1" ] && [ -n "$PROXY_GW" ]; then
     {% for srv in _openclaw_mcp_servers | selectattr('type', 'equalto', 'codex') %}
+    {% if (codex_has_default_auth | bool) or (srv.agent_id in codex_agent_auth_ids) %}
         DOCKER_ARGS=$(jq -n \
             --arg ws "{{ srv.cwd }}" \
             --arg img "$CODEX_IMAGE" \
@@ -1226,7 +1365,7 @@
               "--label","openclaw-role=codex-mcp",
               "--label",("openclaw-agent=" + $agent),
               "--mount",("type=bind,source=" + $ws + ",target=/workspace"),
-              "--mount","type=bind,source=/home/ubuntu/.openclaw/codex-config.toml,target=/home/node/.codex/config.toml,readonly",
+              "--mount",("type=bind,source=/home/ubuntu/.openclaw/codex-config-" + $agent + ".toml,target=/home/node/.codex/config.toml,readonly"),
               "-e","CODEX_PROXY_TOKEN=proxy",
               "-w","/workspace",
               $img,
@@ -1235,6 +1374,7 @@
               "-c",("approval_policy=" + $approval)]')
         SERVERS=$(echo "$SERVERS" | jq --arg name "{{ srv.name }}" --argjson args "$DOCKER_ARGS" \
             '. + [{name: $name, transport: "stdio", command: "docker", args: $args}]')
+    {% endif %}
     {% endfor %}
     fi
 

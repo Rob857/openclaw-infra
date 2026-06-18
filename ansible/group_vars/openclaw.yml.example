@@ -14,6 +14,15 @@
 # Allow sandboxed agents to control browser on the host (native browser tool with target="host")
 # openclaw_browser_allow_host_control: true
 
+# --- Gog / Google Drive on headless VPS (optional) ---
+# Required when agents or Mission Control run `gog auth add ...` on the VPS with
+# the file keyring backend. Store the real value as a Pulumi secret:
+#   pulumi config set gogKeyringPassword --secret
+# Then run:
+#   ./scripts/provision.sh --tags openclaw
+#
+# gog_keyring_password: "use-pulumi-secret-instead-of-committing-this"
+
 # --- Heartbeat quiet hours (optional) ---
 # Suppress heartbeats outside a time window (uses openclaw_timezone).
 # Omit entirely to allow heartbeats 24/7.
@@ -38,20 +47,30 @@
 #     deliver_to: "{{ telegram_user_id | default('') }}"
 #     deliver_type: "dm"
 #     deliver_channel: "telegram"      # telegram (default), whatsapp, or discord
+#     thinking_default: "high"         # optional per-agent override; falls back to openclaw_thinking_default
 #     heartbeat_every: "15m"
 #     heartbeat_model: "anthropic/claude-opus-4-6"  # override default Sonnet
 #     sandbox_mode: "off"  # override default sandbox mode (also sets exec.host=gateway)
-#   - id: "second-agent"
+#   - id: "manfred"
 #     is_default: false
-#     deliver_to: "{{ telegram_second_user_id | default('') }}"
+#     deliver_to: "{{ telegram_manfred_user_id | default('') }}"
 #     deliver_type: "dm"
 #     deliver_channel: "telegram"
+#     thinking_default: "high"
 #     heartbeat_every: "1h"
-#   - id: "whatsapp-agent"
+#   - id: "claudia"
 #     is_default: false
-#     deliver_to: "{{ whatsapp_phone | default('') }}"  # E.164 format: +491234567890
+#     deliver_to: "{{ telegram_claudia_user_id | default('') }}"
 #     deliver_type: "dm"
-#     deliver_channel: "whatsapp"
+#     deliver_channel: "telegram"
+#     thinking_default: "high"
+#     heartbeat_every: "1h"
+#   - id: "gordon"
+#     is_default: false
+#     deliver_to: "{{ telegram_gordon_user_id | default('') }}"
+#     deliver_type: "dm"
+#     deliver_channel: "telegram"
+#     thinking_default: "medium"
 #     heartbeat_every: "1h"
 
 # --- Discord (Option A: single agent, multi-channel sessions) ---
@@ -60,6 +79,17 @@
 #   pulumi config set discordGuildId "YOUR_GUILD_ID"
 #   pulumi config set discordUserId "YOUR_USER_ID"
 #   ./scripts/provision.sh --tags discord
+# Optional: explicitly allow specific Discord text channels and require mentions.
+# Channel IDs come from Discord Developer Mode -> right click channel -> Copy ID.
+# openclaw_discord_channels:
+#   sanji:
+#     id: "123456789012345678"
+#     allow: true
+#     requireMention: true
+#   corby:
+#     id: "234567890123456789"
+#     allow: true
+#     requireMention: true
 # To deliver cron/heartbeat via Discord instead of Telegram, override main agent:
 #   - id: "main"
 #     is_default: true
@@ -109,6 +139,63 @@
 # --- Advanced: manual overrides for auto-generated config ---
 # The following variables are normally auto-generated from openclaw_agents.
 # Define them here ONLY if you need non-standard naming or custom server configurations.
+#
+# Optional Codex auth rotation for rate limits:
+# openclaw_codex_accounts:
+#   main:
+#     auth_jsons:
+#       - "{{ vault_codex_auth_rbeyer1 }}"
+#   manfred:
+#     auth_jsons:
+#       - "{{ vault_codex_auth_rbeyer1 }}"
+#   gordon:
+#     auth_jsons:
+#       - "{{ vault_codex_auth_rbeyer1 }}"
+#       - "{{ vault_codex_auth_sanji }}"
+#       - "{{ vault_codex_auth_info }}"
+#   barney:
+#     auth_jsons:
+#       - "{{ vault_codex_auth_sanji }}"
+#       - "{{ vault_codex_auth_info }}"
+#       - "{{ vault_codex_auth_rbeyer1 }}"
+#
+# If you temporarily let Ansible manage models (`openclaw_manage_models: true`),
+# Gordon can be pinned to a cheaper model in openclaw_agents:
+#   - id: "gordon"
+#     model_primary: "openai-codex/gpt-5.4-mini"
+#     model_fallbacks: []
+#
+# Per-agent reasoning defaults can also be set in openclaw_agents:
+#   - id: "main"
+#     thinking_default: "high"
+#   - id: "manfred"
+#     thinking_default: "high"
+#   - id: "claudia"
+#     thinking_default: "high"
+#   - id: "gordon"
+#     thinking_default: "medium"
+#
+# Optional Gordon-only read connectors:
+# notion_gordon_enabled: false
+# notion_gordon_transport: "stdio"
+# notion_gordon_command: ""
+# notion_gordon_args: []
+# notion_gordon_env: {}
+# notion_gordon_url: ""
+# notion_gordon_allow_private_urls: false
+# notion_gordon_timeout: 300000
+#
+# gdrive_gordon_enabled: true
+# gdrive_gordon_transport: "stdio"
+# gdrive_gordon_command: "node"
+# gdrive_gordon_args:
+#   - "/home/ubuntu/.openclaw/bin/gdrive-gordon-mcp.js"
+# gdrive_gordon_env:
+#   GOG_ACCOUNT_EMAIL: "contact@mapletics.com"
+#   GOG_KEYRING_PASSWORD: "openclaw:file-keyring"
+# gdrive_gordon_url: ""
+# gdrive_gordon_allow_private_urls: false
+# gdrive_gordon_timeout: 300000
 #
 # openclaw_mcp_servers:       # Override auto-generated MCP server list
 # openclaw_workspaces:        # Override auto-generated workspace list

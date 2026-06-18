@@ -229,9 +229,18 @@ else
     check_warn "Could not run security audit"
 fi
 
-# 12. Check Telegram channel (if configured)
+# 12. Check model policy against live OpenClaw catalog
 echo ""
-echo "12. Checking Telegram channel..."
+echo "12. Checking model policy..."
+if "$SCRIPT_DIR/check-model-policy.sh" "$FULL_HOSTNAME"; then
+    check_pass "Model policy check completed"
+else
+    check_fail "Model policy check reported failures"
+fi
+
+# 13. Check Telegram channel (if configured)
+echo ""
+echo "13. Checking Telegram channel..."
 TELEGRAM_STATUS=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "ubuntu@$FULL_HOSTNAME" \
     "openclaw channels status 2>&1" || echo "FAILED")
 
@@ -244,9 +253,9 @@ else
     echo "   Telegram not configured (optional)"
 fi
 
-# 13. Check WhatsApp channel (if configured)
+# 14. Check WhatsApp channel (if configured)
 echo ""
-echo "13. Checking WhatsApp channel..."
+echo "14. Checking WhatsApp channel..."
 WHATSAPP_STATUS=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "ubuntu@$FULL_HOSTNAME" \
     "openclaw channels status 2>&1" || echo "FAILED")
 
@@ -259,9 +268,9 @@ else
     echo "   WhatsApp not configured (optional)"
 fi
 
-# 14. Check cron jobs
+# 15. Check cron jobs
 echo ""
-echo "14. Checking scheduled tasks..."
+echo "15. Checking scheduled tasks..."
 CRON_LIST=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "ubuntu@$FULL_HOSTNAME" \
     "openclaw cron list 2>&1" || echo "FAILED")
 
@@ -273,7 +282,7 @@ else
     echo "   No cron jobs configured (optional)"
 fi
 
-# 15. Check local gateway token (Mac client only)
+# 16. Check local gateway token (Mac client only)
 LOCAL_CONFIG="$HOME/.openclaw/openclaw.json"
 TOKEN_LEN=$(OPENCLAW_CONFIG="$LOCAL_CONFIG" python3 -c "
 import json, os
@@ -282,12 +291,12 @@ with open(os.environ['OPENCLAW_CONFIG']) as f:
 print(len(d.get('gateway', {}).get('remote', {}).get('token', '')))" || echo "0")
 if [ "$TOKEN_LEN" -gt 0 ] 2>/dev/null; then
     echo ""
-    echo "15. Checking local gateway token..."
+    echo "16. Checking local gateway token..."
     check_pass "Local gateway.remote.token is set"
 elif [ -f "$LOCAL_CONFIG" ]; then
     # Non-fatal: verify continues to report all checks
     echo ""
-    echo "15. Checking local gateway token..."
+    echo "16. Checking local gateway token..."
     check_fail "Local gateway.remote.token is EMPTY — node host cannot authenticate"
     echo "   Fix: run ./scripts/setup-mac-node.sh or restore from backup:"
     echo "   cat ~/.openclaw/openclaw.json.bak | python3 -c \"import json,sys; print(json.load(sys.stdin)['gateway']['remote']['token'])\""

@@ -8,6 +8,9 @@
 - name: Patch heartbeat group delivery bug
   ansible.builtin.include_tasks: patch-heartbeat-group-fix.yml
 
+- name: Patch sticky Slack session overrides
+  ansible.builtin.include_tasks: patch-slack-session-overrides.yml
+
 - name: Onboard OpenClaw
   ansible.builtin.include_tasks: onboard.yml
 

@@ -8,6 +8,6 @@ model_provider = "codex_proxy"
 
 [model_providers.codex_proxy]
 name = "Codex Proxy"
-base_url = "http://{{ codex_proxy_gateway_ip }}:{{ openclaw_mcp_adapter.codex_proxy_port }}"
+base_url = "http://{{ codex_proxy_gateway_ip }}:{{ openclaw_mcp_adapter.codex_proxy_port }}{{ codex_route_prefix | default('') }}"
 wire_api = "responses"
 env_key = "CODEX_PROXY_TOKEN"

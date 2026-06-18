@@ -1,0 +1,364 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { pathToFileURL } = require("url");
+const { spawnSync } = require("child_process");
+
+const ACCOUNT = process.env.GOG_ACCOUNT_EMAIL || "";
+const GOG_BIN = process.env.GOG_BIN || "gog";
+const KEYRING_PASSWORD = process.env.GOG_KEYRING_PASSWORD || "";
+const SDK_ROOT =
+  process.env.MCP_SDK_ROOT || "/home/ubuntu/.openclaw/extensions/openclaw-mcp-adapter/node_modules";
+const TMP_ROOT = process.env.GDRIVE_GORDON_TMPDIR || path.join(os.tmpdir(), "gdrive-gordon-mcp");
+
+if (!ACCOUNT) {
+  console.error("GOG_ACCOUNT_EMAIL is required");
+  process.exit(1);
+}
+
+fs.mkdirSync(TMP_ROOT, { recursive: true });
+
+function gog(args, { expectJson = true } = {}) {
+  const env = {
+    ...process.env,
+    ...(KEYRING_PASSWORD ? { GOG_KEYRING_PASSWORD: KEYRING_PASSWORD } : {}),
+  };
+  const res = spawnSync(GOG_BIN, ["-a", ACCOUNT, ...args], {
+    encoding: "utf8",
+    env,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (res.status !== 0) {
+    const stderr = (res.stderr || res.stdout || "gog command failed").trim();
+    throw new Error(stderr);
+  }
+  const stdout = (res.stdout || "").trim();
+  if (!expectJson) return stdout;
+  if (!stdout) return {};
+  return JSON.parse(stdout);
+}
+
+function summarizeFiles(files) {
+  if (!Array.isArray(files) || files.length === 0) return "No files found.";
+  return files
+    .map((file, idx) => {
+      const type = file.mimeType || "unknown";
+      const modified = file.modifiedTime || "unknown";
+      const link = file.webViewLink || "";
+      return `${idx + 1}. ${file.name || "(unnamed)"}\n   id: ${file.id}\n   type: ${type}\n   modified: ${modified}${link ? `\n   link: ${link}` : ""}`;
+    })
+    .join("\n");
+}
+
+function inferExportFormat(meta, requested) {
+  if (requested) return requested;
+  switch (meta.mimeType) {
+    case "application/vnd.google-apps.document":
+      return "md";
+    case "application/vnd.google-apps.spreadsheet":
+      return "csv";
+    case "application/vnd.google-apps.presentation":
+      return "txt";
+    default:
+      return null;
+  }
+}
+
+function isTextual(name, format, mimeType) {
+  const lower = `${name || ""}.${format || ""}`.toLowerCase();
+  if (["md", "txt", "csv", "json", "html", "xml"].includes(format)) return true;
+  return (
+    [
+      "text/",
+      "application/json",
+      "application/xml",
+      "application/javascript",
+    ].some((prefix) => (mimeType || "").startsWith(prefix)) ||
+    /\.(md|txt|csv|json|html|xml|js|ts|tsx|jsx|py|rb|go|java|c|cpp|h|sql|yaml|yml)$/i.test(lower)
+  );
+}
+
+function readDownloadedFile(downloadPath, maxChars) {
+  const data = fs.readFileSync(downloadPath, "utf8");
+  if (data.length <= maxChars) return data;
+  return `${data.slice(0, maxChars)}\n\n[truncated ${data.length - maxChars} chars]`;
+}
+
+function writeTempFile(filenameHint, content) {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, "write-"));
+  const safeName = (filenameHint || "file.txt").replace(/[^\w.-]+/g, "_");
+  const filePath = path.join(dir, safeName);
+  fs.writeFileSync(filePath, content, "utf8");
+  return filePath;
+}
+
+function asSuccess(text) {
+  return { content: [{ type: "text", text }] };
+}
+
+function asError(message) {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+async function main() {
+  const [{ McpServer }, { StdioServerTransport }, { z }] = await Promise.all([
+    import(pathToFileURL(path.join(SDK_ROOT, "@modelcontextprotocol/sdk/dist/esm/server/mcp.js")).href),
+    import(pathToFileURL(path.join(SDK_ROOT, "@modelcontextprotocol/sdk/dist/esm/server/stdio.js")).href),
+    import(pathToFileURL(path.join(SDK_ROOT, "zod/index.js")).href),
+  ]);
+
+  const server = new McpServer({ name: "gdrive-gordon-mcp", version: "0.2.0" });
+
+  server.registerTool(
+    "list_files",
+    {
+      description:
+        "List Google Drive files for Gordon's read-only account. Use this to inspect folders or narrow by a Drive query.",
+      inputSchema: {
+        parentId: z.string().optional(),
+        max: z.number().int().min(1).max(50).optional(),
+        query: z.string().optional(),
+        allDrives: z.boolean().optional(),
+      },
+    },
+    async ({ parentId, max, query, allDrives }) => {
+      try {
+        const args = ["drive", "ls", "--json", "--no-input", "--max", String(max || 20)];
+        if (parentId) args.push("--parent", parentId);
+        if (query) args.push("--query", query);
+        if (allDrives === false) args.push("--no-all-drives");
+        const result = gog(args);
+        return asSuccess(summarizeFiles(result.files || []));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "search_drive",
+    {
+      description: "Search Google Drive by free-text query and return matching files or folders.",
+      inputSchema: {
+        query: z.string().min(1),
+        max: z.number().int().min(1).max(20).optional(),
+        rawQuery: z.boolean().optional(),
+        allDrives: z.boolean().optional(),
+      },
+    },
+    async ({ query, max, rawQuery, allDrives }) => {
+      try {
+        const args = ["drive", "search", "--json", "--no-input", "--max", String(max || 10)];
+        if (rawQuery) args.push("--raw-query");
+        if (allDrives === false) args.push("--no-all-drives");
+        args.push(query);
+        const result = gog(args);
+        return asSuccess(summarizeFiles(result.files || []));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_file",
+    {
+      description:
+        "Read a Google Drive file. For Google Docs/Sheets it exports to markdown/csv automatically when possible.",
+      inputSchema: {
+        fileId: z.string().min(1),
+        format: z.string().optional(),
+        maxChars: z.number().int().min(500).max(200000).optional(),
+      },
+    },
+    async ({ fileId, format, maxChars }) => {
+      try {
+        const maxText = Math.max(500, Math.min(Number(maxChars || 40000), 200000));
+        const meta = gog(["drive", "get", fileId, "--json", "--no-input"]);
+        const exportFormat = inferExportFormat(meta, format || null);
+        const outDir = fs.mkdtempSync(path.join(TMP_ROOT, "read-"));
+        const baseName = (meta.name || fileId).replace(/[^\w.-]+/g, "_");
+        const outPath = path.join(outDir, baseName + (exportFormat ? `.${exportFormat}` : ""));
+        const downloadArgs = ["drive", "download", fileId, "--out", outPath, "--json", "--no-input"];
+        if (exportFormat) downloadArgs.push("--format", exportFormat);
+        const download = gog(downloadArgs);
+        const finalPath = download.path || outPath;
+        const textual = isTextual(meta.name, exportFormat, meta.mimeType);
+
+        if (!textual) {
+          return asSuccess(
+            `Downloaded binary file "${meta.name}" (${meta.mimeType || "unknown"}), but inline text preview is not available.\n` +
+              `id: ${meta.id}\n` +
+              (meta.webViewLink ? `link: ${meta.webViewLink}\n` : "") +
+              `local_path: ${finalPath}`,
+          );
+        }
+
+        const content = readDownloadedFile(finalPath, maxText);
+        return asSuccess(
+          `File: ${meta.name}\n` +
+            `id: ${meta.id}\n` +
+            `mimeType: ${meta.mimeType || "unknown"}\n` +
+            (meta.webViewLink ? `link: ${meta.webViewLink}\n` : "") +
+            `\n${content}`,
+        );
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_folder",
+    {
+      description: "Create a Google Drive folder, optionally inside a parent folder.",
+      inputSchema: {
+        name: z.string().min(1),
+        parentId: z.string().optional(),
+      },
+    },
+    async ({ name, parentId }) => {
+      try {
+        const args = ["drive", "mkdir", name, "--json", "--no-input"];
+        if (parentId) args.push("--parent", parentId);
+        const result = gog(args);
+        return asSuccess(JSON.stringify(result, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "upload_text_file",
+    {
+      description:
+        "Create a new text/markdown/json file in Google Drive or replace an existing file's content while preserving its permissions.",
+      inputSchema: {
+        name: z.string().min(1),
+        content: z.string().min(1),
+        parentId: z.string().optional(),
+        replaceFileId: z.string().optional(),
+        mimeType: z.string().optional(),
+      },
+    },
+    async ({ name, content, parentId, replaceFileId, mimeType }) => {
+      try {
+        const tempPath = writeTempFile(name, content);
+        const args = ["drive", "upload", tempPath, "--json", "--no-input", "--name", name];
+        if (replaceFileId) {
+          args.push("--replace", replaceFileId);
+        } else if (parentId) {
+          args.push("--parent", parentId);
+        }
+        if (mimeType) args.push("--mime-type", mimeType);
+        const result = gog(args);
+        return asSuccess(JSON.stringify(result, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_doc",
+    {
+      description: "Create a Google Doc in Drive and optionally write initial content.",
+      inputSchema: {
+        title: z.string().min(1),
+        content: z.string().optional(),
+        parentId: z.string().optional(),
+      },
+    },
+    async ({ title, content, parentId }) => {
+      try {
+        const args = ["docs", "create", title, "--json", "--no-input"];
+        if (parentId) args.push("--parent", parentId);
+        const created = gog(args);
+        const docId = created.documentId || created.id;
+        if (docId && content) {
+          gog(["docs", "write", docId, "--content", content, "--json", "--no-input"]);
+        }
+        const meta = docId ? gog(["drive", "get", docId, "--json", "--no-input"]) : created;
+        return asSuccess(JSON.stringify(meta, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "write_doc",
+    {
+      description: "Replace or append text in a Google Doc.",
+      inputSchema: {
+        docId: z.string().min(1),
+        content: z.string().min(1),
+        mode: z.enum(["replace", "append"]).optional(),
+      },
+    },
+    async ({ docId, content, mode }) => {
+      try {
+        const effectiveMode = mode || "replace";
+        if (effectiveMode === "replace") {
+          gog(["docs", "clear", docId, "--json", "--no-input"]);
+          gog(["docs", "write", docId, "--content", content, "--json", "--no-input"]);
+        } else {
+          gog(["docs", "insert", docId, content, "--json", "--no-input"]);
+        }
+        const result = gog(["docs", "info", docId, "--json", "--no-input"]);
+        return asSuccess(JSON.stringify(result, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "rename_item",
+    {
+      description: "Rename a Google Drive file or folder.",
+      inputSchema: {
+        fileId: z.string().min(1),
+        newName: z.string().min(1),
+      },
+    },
+    async ({ fileId, newName }) => {
+      try {
+        const result = gog(["drive", "rename", fileId, newName, "--json", "--no-input"]);
+        return asSuccess(JSON.stringify(result, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "move_item",
+    {
+      description: "Move a Google Drive file or folder to a different parent folder.",
+      inputSchema: {
+        fileId: z.string().min(1),
+        parentId: z.string().min(1),
+      },
+    },
+    async ({ fileId, parentId }) => {
+      try {
+        const result = gog(["drive", "move", fileId, "--parent", parentId, "--json", "--no-input"]);
+        return asSuccess(JSON.stringify(result, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch((error) => {
+  console.error("gdrive-gordon-mcp failed:", error);
+  process.exit(1);
+});

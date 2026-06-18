@@ -100,7 +100,10 @@ See [CLAUDE.md — Key Rotation](../CLAUDE.md#key-rotation) for rotation procedu
 **Scenario**: OpenClaw has `tools.elevated.enabled: true` (default), giving it shell access. If the agent is manipulated via prompt injection, it could attempt to run destructive commands, exfiltrate data, or modify config.
 
 **Mitigations in place**:
-- **`agents.defaults.sandbox.mode: "all"`** — all sessions (including web chat) run in Docker containers, preventing direct host access
+- **Runtime split by agent role** — `main` is intentionally unsandboxed on the VPS for operational work and also serves as the personal frontdoor agent; `deepseek-agent` remains sandboxed for lower-stakes tasks
+- `tools.exec.host: "gateway"` — default exec targets the VPS host unless an agent is explicitly sandboxed
+- `agents.defaults.sandbox.mode: "off"` plus per-agent sandbox overrides — the gateway default remains unsandboxed, but selected agents can still be container-isolated
+- `agents.list[*].sandbox.mode: "all"` for selected non-default agents — lower-trust/cost-optimized agents stay in Docker
 - `agents.defaults.sandbox.docker.image: "openclaw-sandbox-custom:latest"` — custom image with dev toolchain and setuid bits stripped
 - `agents.defaults.sandbox.docker.network: "bridge"` — allows web research and git push while isolating from host filesystem, gateway config, and sudo
 - **`agents.defaults.sandbox.docker.readOnlyRoot: false`** — rootfs is writable to allow runtime package installation (`pip install`, `npm install`, `curl` binaries). Container runs as UID 1000 with `--cap-drop ALL`, so Unix file permissions still prevent writing to system directories (`/usr/bin/`, `/etc/`, `/usr/lib/`). Only `/home/node/` is writable. Writable layer is disk-backed (overlay) and destroyed on container recreation. See [Writable Rootfs Rationale](#writable-rootfs-rationale) below.
@@ -115,7 +118,7 @@ See [CLAUDE.md — Key Rotation](../CLAUDE.md#key-rotation) for rotation procedu
 - `tools.elevated.allowFrom.<channel>` — restricts elevated tools to additional channels beyond Telegram
 - Hetzner firewall outbound rules — could restrict to known-good destinations
 
-**Accepted risk**: All sandboxed sessions have workspace write access and bridge networking. A prompt-injected session could exfiltrate workspace data via HTTP or git push, or poison workspace content for future sessions. Host isolation prevents access to gateway config, credentials, and sudo. Sandbox containers run on the default Docker bridge network, which is isolated from the `codex-proxy-net` network where MCP containers (Codex, Claude Code, Pi) and the credential-injecting proxy run — a sandbox session cannot reach the proxy to obtain API tokens. See [Autonomous Agent Safety](./AUTONOMOUS-SAFETY.md) for a multi-agent architecture that would further reduce risk by splitting the night shift into isolated agents.
+**Accepted risk**: The `main` agent has direct VPS host access and is also the personal frontdoor, so prompt injection against that agent has materially higher impact than against sandboxed agents. The compensating control is role separation: reserve `gordon` for team-facing Slack work and route cheaper/low-stakes tasks to sandboxed agents such as `deepseek-agent`. Sandboxed sessions still have workspace write access and bridge networking. A prompt-injected sandbox session could exfiltrate workspace data via HTTP or git push, or poison workspace content for future sessions. Sandbox containers run on the default Docker bridge network, which is isolated from the `codex-proxy-net` network where MCP containers (Codex, Claude Code, Pi) and the credential-injecting proxy run — a sandbox session cannot reach the proxy to obtain API tokens. See [Autonomous Agent Safety](./AUTONOMOUS-SAFETY.md) for a multi-agent architecture that would further reduce risk by splitting the night shift into isolated agents.
 
 **Prompt injection guidance** (from [official docs](https://docs.openclaw.ai/gateway/security)):
 - Lock down inbound DMs (we use allowlist — done)
@@ -124,7 +127,7 @@ See [CLAUDE.md — Key Rotation](../CLAUDE.md#key-rotation) for rotation procedu
 - Prefer the latest, strongest model for tool-enabled agents
 - Red flags: requests to "read this URL and do exactly what it says", ignore system prompts, or reveal hidden instructions
 
-**Residual Risk**: Medium for all sessions (sandboxed in Docker — no host access, no sudo, no gateway config — but network-enabled workspace exfiltration possible).
+**Residual Risk**: High for `main` (host access on the VPS). Medium for sandboxed agents such as `deepseek-agent` (no host access, no sudo, but network-enabled workspace exfiltration still possible).
 
 ### 5. Self-Modification via Node Control
 

@@ -1,44 +1,28 @@
 ---
 # Non-secret defaults for OpenClaw provisioning.
 # Secrets are passed via scripts/provision.sh from Pulumi config.
+#
+# Important:
+# - `openclaw_manage_models=true` means Ansible manages chat model routing.
+# - deployments can set `openclaw_manage_models=false` and then Mission Control /
+#   `~/.openclaw/openclaw.json` become the operational source of truth.
 
 openclaw_timezone: "Europe/Berlin"
-openclaw_model_primary: "anthropic/claude-opus-4-6"
+openclaw_manage_models: true
+openclaw_model_primary: "openai-codex/gpt-5.4"
 openclaw_model_fallbacks:
-  - "anthropic/claude-opus-4-5"
+  - "anthropic/claude-sonnet-4-6"
+  - "openrouter/free"
 openclaw_thinking_default: "high"
+openclaw_heartbeat_model: "anthropic/claude-sonnet-4-6"
 
-# Custom model definitions (for models not yet in OpenClaw's built-in registry)
+# Prefer OpenClaw's built-in provider catalog for Anthropic/OpenAI/DeepSeek.
+# Only add entries here for providers or models missing from the upstream catalog.
 openclaw_custom_models:
   mode: "merge"
-  providers:
-    anthropic:
-      baseUrl: "https://api.anthropic.com"
-      api: "anthropic-messages"
-      models:
-        - id: "claude-opus-4-6"
-          name: "Claude Opus 4.6"
-          reasoning: true
-          input: ["text", "image"]
-          # 200K limit: Claude Max (subscription / setup-token auth) does NOT support 1M context.
-          # Anthropic rejects the context-1m-2025-08-07 beta header for sk-ant-oat* OAuth tokens.
-          # OpenClaw auto-skips context1m when it detects subscription auth (PR #24620, Feb 2026).
-          #
-          # This value drives compaction timing: OpenClaw compacts at
-          #   contextWindow - reserveTokensFloor  (see openclaw_compaction_reserve_tokens_floor below).
-          # Setting it to 1000000 would push the compaction trigger to ~976K — the API rejects at
-          # 200K first, compaction never fires, and sessions die with duplicate Telegram deliveries.
-          #
-          # API key auth (sk-ant-api03-*): if you switch away from Claude Max, you can set:
-          #   contextWindow: 1000000
-          #   context1m: true   ← OpenClaw injects the beta header automatically
-          # Still keep reserveTokensFloor high (~50K) to compact well before 200K — extended context
-          # bills the ENTIRE input at the premium rate ($10 vs $5/MTok input, $37.50 vs $25/MTok
-          # output), not just the excess. Staying under 200K is almost always cheaper.
-          contextWindow: 200000
-          maxTokens: 128000
+  providers: {}
 nodejs_major_version: 25
-openclaw_version: "2026.3.23"
+openclaw_version: "2026.3.31"
 openclaw_heartbeat_interval: "30m"
 openclaw_agent_timeout_seconds: 1500  # 25 minutes per conversation turn (default: 600)
 openclaw_cooldown_failure_window_hours: 1  # reset cooldown error count after 1h (default: 24)
@@ -52,7 +36,7 @@ mission_control_git_revision: "c0013e430757df2bf51965e4bbe1d35e8f3c8c6b"
 mission_control_checkout_path: "/home/ubuntu/mission-control"
 mission_control_host: "127.0.0.1"
 mission_control_port: 3333
-mission_control_expose_via_tailscale: false
+mission_control_expose_via_tailscale: true
 mission_control_serve_path: "/mission-control"
 force_mission_control_rebuild: false
 
@@ -222,6 +206,17 @@ openclaw_mcp_adapter:
   pi_mcp_thinking: "xhigh"
   # Note: MCP servers are auto-generated from openclaw_agents × openclaw_mcp_server_types
   # in playbook.yml pre_tasks. The 'servers' key was removed — see _openclaw_mcp_servers.
+
+# Optional per-agent Codex/ChatGPT auth. Keys must match openclaw_agents[].id.
+# Example:
+# openclaw_codex_accounts:
+#   manfred:
+#     auth_json: "{{ vault_codex_auth_manfred }}"
+#   sanji:
+#     auth_json: "{{ vault_codex_auth_sanji }}"
+# If unset, the legacy single-account `codex_auth_json` flow is used.
+openclaw_codex_accounts: {}
+openclaw_codex_auth_mode: "shared"  # shared | per-agent
 
 # MCP server type templates — cross-producted with openclaw_agents to auto-generate
 # the per-agent MCP server list (_openclaw_mcp_servers). Each type produces one server

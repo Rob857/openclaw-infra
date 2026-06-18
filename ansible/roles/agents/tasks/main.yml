@@ -50,6 +50,27 @@
   changed_when: false
 
 # Default agent uses agents.defaults.* (implicit, not in agents.list)
+- name: Remove default agent heartbeat targeting
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export XDG_RUNTIME_DIR=/run/user/1000
+    CURRENT=$(openclaw config get "agents.defaults.heartbeat" 2>&1 | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || {
+        if echo "$CURRENT" | grep -qi "not set\|not found\|does not exist\|undefined"; then
+            echo "OK"
+            exit 0
+        fi
+        echo "ERROR reading heartbeat config for default agent: $CURRENT" >&2
+        exit 1
+    }
+    openclaw config unset "agents.defaults.heartbeat"
+    echo "UPDATED: removed default agent heartbeat"
+  args:
+    executable: /bin/bash
+  when: not (openclaw_heartbeats_enabled | default(true))
+  register: default_heartbeat_remove_result
+  changed_when: "'UPDATED' in (default_heartbeat_remove_result.stdout | default(''))"
+  notify: restart openclaw-gateway
+
 - name: Set default agent heartbeat targeting
   ansible.builtin.shell: |
     set -euo pipefail
@@ -75,7 +96,9 @@
     executable: /bin/bash
   vars:
     _default_agent: "{{ openclaw_agents | selectattr('is_default', 'equalto', true) | first }}"
-  when: (_default_agent.deliver_to | default('')) != ''
+  when:
+    - openclaw_heartbeats_enabled | default(true)
+    - (_default_agent.deliver_to | default('')) != ''
   register: default_heartbeat_result
   changed_when: "'UPDATED' in (default_heartbeat_result.stdout | default(''))"
   notify: restart openclaw-gateway
@@ -100,6 +123,9 @@
   register: default_sandbox_result
   changed_when: "'UPDATED' in (default_sandbox_result.stdout | default(''))"
   notify: restart openclaw-gateway
+
+# OpenClaw currently validates `agents.defaults.subagents` without `allowAgents`.
+# Keep delegation allowlists on explicit non-default agent entries only.
 
 # Non-default agents use agents.list.N.* (explicit entries)
 - block:
@@ -140,11 +166,41 @@
         fi
       args:
         executable: /bin/bash
-      loop: "{{ openclaw_agents | selectattr('is_default', 'equalto', false) | selectattr('deliver_to', 'ne', '') | list }}"
+      loop: "{{ openclaw_agents | selectattr('is_default', 'equalto', false) | selectattr('deliver_to', 'defined') | selectattr('deliver_to', 'ne', '') | list }}"
       loop_control:
         label: "{{ item.id }} → {{ item.deliver_to }}"
       register: heartbeat_result
       changed_when: "'UPDATED' in heartbeat_result.stdout"
+      notify: restart openclaw-gateway
+
+    - name: Remove non-default agent heartbeats
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        AGENT_INDEX=$(jq -r --arg id {{ item.id | quote }} 'to_entries[] | select(.value.id == $id) | .key' /tmp/ansible_agents_current.json)
+        if [ -z "$AGENT_INDEX" ]; then
+            echo "ERROR: Agent {{ item.id | quote }} not found in agents list after creation step" >&2
+            cat /tmp/ansible_agents_current.json >&2
+            exit 1
+        fi
+        CURRENT=$(openclaw config get "agents.list.${AGENT_INDEX}.heartbeat" 2>&1 | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || {
+            if echo "$CURRENT" | grep -qi "not set\|not found\|does not exist\|undefined"; then
+                echo "OK"
+                exit 0
+            fi
+            echo "ERROR reading heartbeat config for {{ item.id }}: $CURRENT" >&2
+            exit 1
+        }
+        openclaw config unset "agents.list.${AGENT_INDEX}.heartbeat"
+        echo "UPDATED: removed {{ item.id }} heartbeat"
+      args:
+        executable: /bin/bash
+      loop: "{{ openclaw_agents | selectattr('is_default', 'equalto', false) | list }}"
+      loop_control:
+        label: "{{ item.id }}"
+      when: not (openclaw_heartbeats_enabled | default(true))
+      register: heartbeat_remove_result
+      changed_when: "'UPDATED' in heartbeat_remove_result.stdout"
       notify: restart openclaw-gateway
 
     - name: Set non-default agent sandbox mode override
@@ -173,9 +229,301 @@
       changed_when: "'UPDATED' in sandbox_result.stdout"
       notify: restart openclaw-gateway
 
+    - name: Set non-default agent model primary override
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        AGENT_INDEX=$(jq -r --arg id {{ item.id | quote }} 'to_entries[] | select(.value.id == $id) | .key' /tmp/ansible_agents_current.json)
+        if [ -z "$AGENT_INDEX" ]; then
+            echo "ERROR: Agent {{ item.id | quote }} not found in agents list" >&2
+            exit 1
+        fi
+        CURRENT=$(openclaw config get "agents.list.${AGENT_INDEX}.model.primary" 2>/dev/null | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || CURRENT=""
+        DESIRED="{{ item.model_primary }}"
+        if [ "$CURRENT" = "$DESIRED" ]; then
+            echo "OK"
+        else
+            openclaw config set "agents.list.${AGENT_INDEX}.model.primary" "$DESIRED"
+            echo "UPDATED: {{ item.id }} model.primary -> {{ item.model_primary }}"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ openclaw_agents | selectattr('model_primary', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.id }} -> {{ item.model_primary }}"
+      register: model_primary_result
+      changed_when: "'UPDATED' in model_primary_result.stdout"
+      notify: restart openclaw-gateway
+      when: openclaw_manage_models | default(true) | bool
+
+    - name: Set per-agent thinking default override
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        AGENT_INDEX=$(jq -r --arg id {{ item.id | quote }} 'to_entries[] | select(.value.id == $id) | .key' /tmp/ansible_agents_current.json)
+        if [ -z "$AGENT_INDEX" ]; then
+            echo "ERROR: Agent {{ item.id | quote }} not found in agents list" >&2
+            exit 1
+        fi
+        CURRENT=$(openclaw config get "agents.list.${AGENT_INDEX}.thinkingDefault" 2>/dev/null | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || CURRENT=""
+        DESIRED="{{ item.thinking_default }}"
+        if [ "$CURRENT" = "$DESIRED" ]; then
+            echo "OK"
+        else
+            openclaw config set "agents.list.${AGENT_INDEX}.thinkingDefault" "$DESIRED"
+            echo "UPDATED: {{ item.id }} thinkingDefault -> {{ item.thinking_default }}"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ openclaw_agents | selectattr('thinking_default', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.id }} -> {{ item.thinking_default }}"
+      register: thinking_default_result
+      changed_when: "'UPDATED' in thinking_default_result.stdout"
+      notify: restart openclaw-gateway
+
+    - name: Set non-default agent model fallback overrides
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        AGENT_INDEX=$(jq -r --arg id {{ item.id | quote }} 'to_entries[] | select(.value.id == $id) | .key' /tmp/ansible_agents_current.json)
+        if [ -z "$AGENT_INDEX" ]; then
+            echo "ERROR: Agent {{ item.id | quote }} not found in agents list" >&2
+            exit 1
+        fi
+        DESIRED='{{ item.model_fallbacks | to_json }}'
+        CURRENT=$(openclaw config get "agents.list.${AGENT_INDEX}.model.fallbacks" 2>&1 | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || {
+            if echo "$CURRENT" | grep -qi "not set\|not found\|does not exist\|undefined"; then
+                CURRENT="[]"
+            else
+                echo "ERROR reading model fallbacks for {{ item.id }}: $CURRENT" >&2
+                exit 1
+            fi
+        }
+        C_NORM=$(echo "$CURRENT" | jq -cS '.' 2>/dev/null || echo "PARSE_FAIL")
+        D_NORM=$(echo "$DESIRED" | jq -cS '.')
+        if [ "$C_NORM" != "PARSE_FAIL" ] && [ "$C_NORM" = "$D_NORM" ]; then
+            echo "OK"
+        else
+            openclaw config set "agents.list.${AGENT_INDEX}.model.fallbacks" --json "$DESIRED"
+            echo "UPDATED: {{ item.id }} model.fallbacks"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ openclaw_agents | selectattr('model_fallbacks', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: model_fallbacks_result
+      changed_when: "'UPDATED' in model_fallbacks_result.stdout"
+      notify: restart openclaw-gateway
+      when: openclaw_manage_models | default(true) | bool
+
+    - name: Set non-default agent display name override
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        AGENT_INDEX=$(jq -r --arg id {{ item.id | quote }} 'to_entries[] | select(.value.id == $id) | .key' /tmp/ansible_agents_current.json)
+        if [ -z "$AGENT_INDEX" ]; then
+            echo "ERROR: Agent {{ item.id | quote }} not found in agents list" >&2
+            exit 1
+        fi
+        CURRENT=$(openclaw config get "agents.list.${AGENT_INDEX}.name" 2>/dev/null | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || CURRENT=""
+        DESIRED="{{ item.name }}"
+        if [ "$CURRENT" = "$DESIRED" ]; then
+            echo "OK"
+        else
+            openclaw config set "agents.list.${AGENT_INDEX}.name" "$DESIRED"
+            echo "UPDATED: {{ item.id }} name -> {{ item.name }}"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ openclaw_agents | selectattr('is_default', 'equalto', false) | selectattr('name', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.id }} -> {{ item.name }}"
+      register: agent_name_result
+      changed_when: "'UPDATED' in agent_name_result.stdout"
+      notify: restart openclaw-gateway
+
+    - name: Set non-default agent subagent allowlist override
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        AGENT_INDEX=$(jq -r --arg id {{ item.id | quote }} 'to_entries[] | select(.value.id == $id) | .key' /tmp/ansible_agents_current.json)
+        if [ -z "$AGENT_INDEX" ]; then
+            echo "ERROR: Agent {{ item.id | quote }} not found in agents list" >&2
+            exit 1
+        fi
+        DESIRED='{{ item.subagent_allow_agents | to_json }}'
+        CURRENT=$(openclaw config get "agents.list.${AGENT_INDEX}.subagents.allowAgents" 2>&1 | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || {
+            if echo "$CURRENT" | grep -qi "not set\|not found\|does not exist\|undefined"; then
+                CURRENT="[]"
+            else
+                echo "ERROR reading subagent allowlist for {{ item.id }}: $CURRENT" >&2
+                exit 1
+            fi
+        }
+        C_NORM=$(echo "$CURRENT" | jq -cS '.' 2>/dev/null || echo "PARSE_FAIL")
+        D_NORM=$(echo "$DESIRED" | jq -cS '.')
+        if [ "$C_NORM" != "PARSE_FAIL" ] && [ "$C_NORM" = "$D_NORM" ]; then
+            echo "OK"
+        else
+            openclaw config set "agents.list.${AGENT_INDEX}.subagents.allowAgents" --json "$DESIRED"
+            echo "UPDATED: {{ item.id }} subagents.allowAgents"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ openclaw_agents | selectattr('is_default', 'equalto', false) | selectattr('subagent_allow_agents', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: subagent_allowlist_result
+      changed_when: "'UPDATED' in subagent_allowlist_result.stdout"
+      notify: restart openclaw-gateway
+
+    - name: Write desired bindings JSON to temp file
+      ansible.builtin.copy:
+        content: "{{ openclaw_bindings | to_json }}"
+        dest: /tmp/ansible_bindings.json
+        mode: '0600'
+      changed_when: false
+      when: openclaw_bindings is defined
+
+    - name: Set agent bindings from declarative config
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export XDG_RUNTIME_DIR=/run/user/1000
+        DESIRED=$(cat /tmp/ansible_bindings.json)
+        CURRENT=$(openclaw config get bindings 2>&1 | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || {
+            if echo "$CURRENT" | grep -qi "not set\|not found\|does not exist\|undefined"; then
+                CURRENT="[]"
+            else
+                echo "ERROR reading bindings: $CURRENT" >&2
+                exit 1
+            fi
+        }
+        C_NORM=$(echo "$CURRENT" | jq -cS '.' 2>/dev/null || echo "PARSE_FAIL")
+        D_NORM=$(echo "$DESIRED" | jq -cS '.')
+        if [ "$C_NORM" != "PARSE_FAIL" ] && [ "$C_NORM" = "$D_NORM" ]; then
+            echo "OK"
+        else
+            openclaw config set bindings --json "$DESIRED"
+            echo "UPDATED: bindings"
+        fi
+      args:
+        executable: /bin/bash
+      when: openclaw_bindings is defined
+      register: declarative_bindings_result
+      changed_when: "'UPDATED' in declarative_bindings_result.stdout"
+      notify: restart openclaw-gateway
+
+    - name: Write desired agent model config to temp file
+      ansible.builtin.copy:
+        content: "{{ openclaw_agents | to_json }}"
+        dest: /tmp/ansible_agents_desired.json
+        mode: '0600'
+      changed_when: false
+
+    - name: Clean stale Slack sessions after model/auth changes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 << 'PYEOF'
+        import json
+        import os
+        from datetime import datetime
+
+        with open("/tmp/ansible_agents_desired.json") as f:
+            agents = json.load(f)
+
+        desired = {}
+        for agent in agents:
+            agent_id = agent["id"]
+            primary = agent.get("model_primary") or "{{ openclaw_model_primary }}"
+            if "/" in primary:
+                provider, short_model = primary.split("/", 1)
+            else:
+                provider, short_model = "", primary
+            desired[agent_id] = {
+                "provider": provider,
+                "short_model": short_model,
+            }
+
+        changed = False
+        timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+
+        for agent_id, model_info in desired.items():
+            sessions_path = f"/home/ubuntu/.openclaw/agents/{agent_id}/sessions/sessions.json"
+            if not os.path.exists(sessions_path):
+                continue
+
+            with open(sessions_path) as f:
+                store = json.load(f)
+
+            keys_to_remove = []
+            for key, entry in store.items():
+                if not key.startswith(f"agent:{agent_id}:slack:"):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                reasons = []
+                if entry.get("authProfileOverride"):
+                    reasons.append("authProfileOverride")
+
+                entry_model = entry.get("model")
+                if entry_model and entry_model != model_info["short_model"]:
+                    reasons.append(f"model={entry_model}")
+
+                entry_provider = entry.get("modelProvider")
+                if entry_provider and model_info["provider"] and entry_provider != model_info["provider"]:
+                    reasons.append(f"provider={entry_provider}")
+
+                if reasons:
+                    keys_to_remove.append((key, entry.get("sessionId", ""), ",".join(reasons)))
+
+            if not keys_to_remove:
+                continue
+
+            for key, session_id, reason_text in keys_to_remove:
+                entry = store.pop(key, None)
+                if not entry:
+                    continue
+                print(f"FIXED: removed stale slack session {key} ({reason_text})")
+                changed = True
+                if not session_id:
+                    continue
+                base = f"/home/ubuntu/.openclaw/agents/{agent_id}/sessions/{session_id}.jsonl"
+                lock = f"{base}.lock"
+                if os.path.exists(base):
+                    os.rename(base, f"{base}.deleted.{timestamp}")
+                if os.path.exists(lock):
+                    os.remove(lock)
+
+            with open(sessions_path, "w") as f:
+                json.dump(store, f, indent=2)
+
+        if not changed:
+            print("OK: no stale slack sessions found")
+        PYEOF
+      args:
+        executable: /bin/bash
+      register: slack_session_cleanup_result
+      changed_when: "'FIXED' in slack_session_cleanup_result.stdout"
+      notify: restart openclaw-gateway
+
   always:
+    - name: Clean up bindings temp file
+      ansible.builtin.file:
+        path: /tmp/ansible_bindings.json
+        state: absent
+      changed_when: false
+
     - name: Clean up current agents temp file
       ansible.builtin.file:
         path: /tmp/ansible_agents_current.json
+        state: absent
+      changed_when: false
+
+    - name: Clean up desired agents temp file
+      ansible.builtin.file:
+        path: /tmp/ansible_agents_desired.json
         state: absent
       changed_when: false

@@ -11,17 +11,31 @@
       dest: /tmp/ansible-gateway-token
     - content: "{{ xai_api_key | default('') }}"
       dest: /tmp/ansible-xai-api-key
+    - content: "{{ openrouter_api_key | default('') }}"
+      dest: /tmp/ansible-openrouter-api-key
+    - content: "{{ deepseek_api_key | default('') }}"
+      dest: /tmp/ansible-deepseek-api-key
     - content: "{{ groq_api_key | default('') }}"
       dest: /tmp/ansible-groq-api-key
     - content: >-
+        {% set _models = openclaw_custom_models -%}
+        {% if deepseek_api_key is defined and deepseek_api_key | length > 0 -%}
+        {%   set _models = _models | combine({'providers': {'deepseek': {
+                'baseUrl': 'https://api.deepseek.com',
+                'apiKey': deepseek_api_key,
+                'api': 'openai-completions',
+                'models': []
+              }}}, recursive=true) -%}
+        {%- endif -%}
         {% if groq_api_key is defined and groq_api_key | length > 0 -%}
-        {{ openclaw_custom_models | combine({'providers': {'groq': {'baseUrl': openclaw_groq_base_url, 'apiKey': groq_api_key, 'models': []}}}, recursive=true) | to_json }}
-        {%- else -%}
-        {{ openclaw_custom_models | to_json }}
-        {%- endif %}
+        {%   set _models = _models | combine({'providers': {'groq': {'baseUrl': openclaw_groq_base_url, 'apiKey': groq_api_key, 'models': []}}}, recursive=true) -%}
+        {%- endif -%}
+        {{ _models | to_json }}
       dest: /tmp/ansible-custom-models
     - content: "{{ openclaw_model_fallbacks | to_json }}"
       dest: /tmp/ansible-model-fallbacks
+    - content: "{{ openclaw_codex_accounts | default({}) | to_json }}"
+      dest: /tmp/ansible-codex-accounts
     - content: >-
         {{ {'enabled': openclaw_compaction_memory_flush,
             'softThresholdTokens': openclaw_compaction_memory_flush_threshold,
@@ -37,6 +51,7 @@
         export XDG_RUNTIME_DIR=/run/user/1000
         GATEWAY_TOKEN=$(cat /tmp/ansible-gateway-token)
         XAI_API_KEY=$(cat /tmp/ansible-xai-api-key)
+        OPENROUTER_API_KEY=$(cat /tmp/ansible-openrouter-api-key)
         CHANGED=""
         HASH_DIR="/home/ubuntu/.openclaw/.ansible-hashes"
         mkdir -p "$HASH_DIR"
@@ -102,6 +117,26 @@
                 fi
             }
         done
+        {% endif %}
+
+        # OpenRouter
+        {% if openrouter_api_key is defined and openrouter_api_key | length > 0 %}
+        if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "ERROR: OpenRouter API key template was non-empty but runtime value is empty"
+            exit 1
+        fi
+        check_set_secret env.OPENROUTER_API_KEY "$OPENROUTER_API_KEY" openrouter-api-key
+        {% else %}
+        output=$(openclaw config unset env.OPENROUTER_API_KEY 2>&1) && {
+            CHANGED="yes"
+        } || {
+            if echo "$output" | grep -qi "not set\|not found\|does not exist"; then
+                true
+            else
+                echo "ERROR: Failed to unset env.OPENROUTER_API_KEY: $output"
+                exit 1
+            fi
+        }
         {% endif %}
 
         # Voice transcription — Groq provider cleanup (setting is in the settings task,
@@ -197,6 +232,20 @@
             fi
         }
 
+        unset_if_exists() {
+            local key="$1" output
+            output=$(openclaw config unset "$key" 2>&1) && {
+                CHANGED="yes"
+            } || {
+                if echo "$output" | grep -qi "not set\|not found\|does not exist\|undefined"; then
+                    true
+                else
+                    echo "ERROR: Failed to unset $key: $output"
+                    exit 1
+                fi
+            }
+        }
+
         # Tailscale Serve
         check_set gateway.tailscale.mode serve
         check_set gateway.tailscale.resetOnExit true
@@ -211,10 +260,28 @@
         # Auth: Tailscale identity
         check_set gateway.auth.allowTailscale true
 
+        {% if openclaw_manage_models | default(true) | bool %}
         # Model defaults
         check_set agents.defaults.model.primary "{{ openclaw_model_primary }}"
         check_set_json agents.defaults.model.fallbacks "$(cat /tmp/ansible-model-fallbacks)"
         check_set agents.defaults.thinkingDefault "{{ openclaw_thinking_default }}"
+
+        # Clear stale model picker allowlists from older deployments.
+        # These lists pin obsolete ids and can force `/model` and session switches onto
+        # retired entries even when defaultModel/fallbacks were updated.
+        for key in agents.defaults.models; do
+            output=$(openclaw config unset "$key" 2>&1) && {
+                CHANGED="yes"
+            } || {
+                if echo "$output" | grep -qi "not set\|not found\|does not exist"; then
+                    true
+                else
+                    echo "ERROR: Failed to unset $key: $output"
+                    exit 1
+                fi
+            }
+        done
+        {% endif %}
 
         # Custom models: hash-based comparison (server enriches config with extra fields,
         # so direct JSON comparison always finds a diff). Hash the desired value instead.
@@ -250,11 +317,22 @@
         # Includes bundled plugins (device-pair, memory-core, etc.) because
         # plugins.allow blocks ALL plugins not listed, including bundled ones.
         {# WhatsApp plugin removed in 2026.3.22 (built into core). Do not list in plugins.allow. #}
-        {% set plugin_allow = ["device-pair","memory-core","phone-control","talk-voice","telegram"] %}
+        {% set plugin_allow = ["device-pair","memory-core","phone-control","talk-voice","telegram","slack","discord"] %}
         {% if openclaw_mcp_adapter is defined and mcp_adapter_installed.stat.exists %}
         {%   set _ = plugin_allow.append("openclaw-mcp-adapter") %}
         {% endif %}
         check_set_json plugins.allow '{{ plugin_allow | to_json }}'
+
+        # Clear legacy global tool profile from older onboarding runs.
+        # Newer OpenClaw releases validate the built-in "coding" profile more strictly,
+        # which produces warnings for entries no longer available in this runtime.
+        # We explicitly manage the sandbox/plugin allowlist above, so the old profile
+        # only adds noise and conflicting defaults.
+        CURRENT_PROFILE=$(openclaw config get tools.profile 2>/dev/null | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || CURRENT_PROFILE=""
+        if [ -n "$CURRENT_PROFILE" ]; then
+            openclaw config unset tools.profile 2>/dev/null || true
+            CHANGED="yes"
+        fi
 
         # Elevated tools — DISABLED to prevent sandbox escape to VPS host.
         # elevated=true on exec calls bypasses tools.exec.host and grants root.
@@ -294,12 +372,16 @@
         check_set agents.defaults.timeoutSeconds "{{ openclaw_agent_timeout_seconds }}"
 
         # Heartbeat interval
+        {% if openclaw_heartbeats_enabled | default(true) %}
         check_set agents.defaults.heartbeat.every "{{ openclaw_heartbeat_interval }}"
-        check_set agents.defaults.heartbeat.model "anthropic/claude-sonnet-4-20250514"
+        check_set agents.defaults.heartbeat.model "{{ openclaw_heartbeat_model | default('anthropic/claude-sonnet-4-6') }}"
         {% if openclaw_heartbeat_active_hours is defined and openclaw_heartbeat_active_hours %}
         check_set_json agents.defaults.heartbeat.activeHours '{{ openclaw_heartbeat_active_hours | to_json }}'
         {% endif %}
         check_set agents.defaults.heartbeat.directPolicy allow
+        {% else %}
+        unset_if_exists agents.defaults.heartbeat
+        {% endif %}
 
         # Message queue: collect messages while agent is busy, coalesce into one followup turn
         check_set messages.queue.mode collect
@@ -344,6 +426,11 @@
         check_set_json agents.defaults.sandbox.docker.readOnlyRoot '{{ openclaw_sandbox_read_only_root | to_json }}'
         check_set_json agents.defaults.sandbox.browser.allowHostControl '{{ openclaw_browser_allow_host_control | to_json }}'
 
+        {% if gog_keyring_password is defined and gog_keyring_password | length > 0 %}
+        # Make gog usable from sandboxed agent exec contexts, not only gateway/MCP processes.
+        check_set_json agents.defaults.sandbox.docker.env.GOG_KEYRING_PASSWORD '"{{ gog_keyring_password }}"'
+        {% endif %}
+
         {% if beads_shared_server_enabled | default(false) %}
         # Beads shared Dolt server: containers connect to host-side dolt sql-server via TCP
         # Use check_set_json with quoted strings — openclaw config set auto-parses bare
@@ -361,7 +448,14 @@
         {% endif %}
 
         # Telegram: suppress notification sounds for error replies
+        check_set_json channels.telegram.enabled '{{ (openclaw_telegram_enabled | default(false)) | to_json }}'
         check_set_json channels.telegram.silentErrorReplies 'true'
+
+        # Slack account routing
+        check_set_json channels.slack.accounts.default.enabled '{{ (openclaw_slack_default_enabled | default(true)) | to_json }}'
+
+        # Disable unused legacy channels unless explicitly kept
+        check_set_json channels.whatsapp.enabled '{{ (openclaw_whatsapp_enabled | default(false)) | to_json }}'
 
         # Health monitor: faster detection of silent channel disconnections
         check_set gateway.channelStaleEventThresholdMinutes "{{ openclaw_health_monitor_stale_minutes }}"
@@ -449,6 +543,8 @@
       loop:
         - /tmp/ansible-gateway-token
         - /tmp/ansible-xai-api-key
+        - /tmp/ansible-openrouter-api-key
+        - /tmp/ansible-deepseek-api-key
         - /tmp/ansible-groq-api-key
         - /tmp/ansible-custom-models
         - /tmp/ansible-model-fallbacks
@@ -458,47 +554,186 @@
   ansible.builtin.shell: |
     set -euo pipefail
     python3 << 'PYEOF'
-    import json, os
+    import base64, json, os, shutil
     from pathlib import Path
 
     openclaw_dir = Path(os.path.expanduser("~/.openclaw"))
     token_file = openclaw_dir / "anthropic-auth-token"
+    codex_accounts_file = Path("/tmp/ansible-codex-accounts")
+    codex_auth_mode = "{{ openclaw_codex_auth_mode | default('shared') }}"
+    shared_profiles_path = openclaw_dir / "shared" / "auth-profiles.json"
 
     if not token_file.exists():
         print("SKIP: anthropic-auth-token not found")
         raise SystemExit(0)
 
     token = token_file.read_text().strip()
+    codex_accounts = json.loads(codex_accounts_file.read_text()) if codex_accounts_file.exists() else {}
     changed_agents = []
 
-    for agent_dir in sorted((openclaw_dir / "agents").iterdir()):
+    def decode_jwt_payload(token_value):
+        parts = token_value.split(".")
+        if len(parts) < 2:
+            raise ValueError("token missing JWT payload segment")
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+
+    def build_codex_profiles(auth_jsons):
+        profiles = {}
+        ordered_profile_ids = []
+
+        for raw_auth in auth_jsons or []:
+            if not raw_auth:
+                continue
+
+            try:
+                auth = json.loads(raw_auth)
+                tokens = auth.get("tokens") or {}
+                access = tokens.get("access_token")
+                refresh = tokens.get("refresh_token")
+                if not access or not refresh:
+                    continue
+
+                access_payload = decode_jwt_payload(access)
+                id_token = tokens.get("id_token")
+                id_payload = decode_jwt_payload(id_token) if id_token else {}
+                email = (
+                    access_payload.get("https://api.openai.com/profile", {}).get("email")
+                    or id_payload.get("email")
+                )
+                if not email:
+                    continue
+
+                account_id = (
+                    tokens.get("account_id")
+                    or access_payload.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
+                )
+                expires = auth.get("expires") or auth.get("expires_at") or access_payload.get("exp", 0) * 1000
+                profile_id = f"openai-codex:{email}"
+
+                profile = {
+                    "type": "oauth",
+                    "provider": "openai-codex",
+                    "access": access,
+                    "refresh": refresh,
+                    "expires": expires,
+                    "email": email,
+                }
+                if account_id:
+                    profile["accountId"] = account_id
+
+                profiles[profile_id] = profile
+                ordered_profile_ids.append(profile_id)
+            except Exception:
+                continue
+
+        if ordered_profile_ids:
+            default_profile = dict(profiles[ordered_profile_ids[0]])
+            default_profile.pop("email", None)
+            profiles["openai-codex:default"] = default_profile
+
+        return profiles, ordered_profile_ids
+
+    def load_profile_file(path):
+        if not path.exists():
+            return {}
+        content = path.read_text().strip()
+        try:
+            return json.loads(content) if content else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def desired_agent_data(agent_name, current_data):
+        original_profiles = current_data.get("profiles", {})
+        original_last_good = dict(current_data.get("lastGood", {}))
+        codex_profiles, ordered_codex_ids = build_codex_profiles(
+            (codex_accounts.get(agent_name) or {}).get("auth_jsons") or []
+        )
+
+        desired_default = {"type": "token", "provider": "anthropic", "token": token}
+        rebuilt_profiles = {"anthropic:default": desired_default}
+        for key, value in original_profiles.items():
+            if key in {"anthropic:default", "anthropic:api-key"} or key.startswith("openai-codex:"):
+                continue
+            rebuilt_profiles[key] = value
+        for key, value in codex_profiles.items():
+            rebuilt_profiles[key] = value
+
+        last_good = dict(original_last_good)
+        last_good["anthropic"] = "anthropic:default"
+        if ordered_codex_ids:
+            last_good["openai-codex"] = ordered_codex_ids[0]
+        else:
+            last_good.pop("openai-codex", None)
+
+        desired = dict(current_data)
+        desired["version"] = 1
+        desired["profiles"] = rebuilt_profiles
+        desired["lastGood"] = last_good
+        return desired
+
+    agent_dirs = sorted((openclaw_dir / "agents").iterdir())
+    if codex_auth_mode == "shared":
+        source_agent = "main" if (codex_accounts.get("main") or {}).get("auth_jsons") else None
+        if source_agent is None:
+            for agent_dir in agent_dirs:
+                if (codex_accounts.get(agent_dir.name) or {}).get("auth_jsons"):
+                    source_agent = agent_dir.name
+                    break
+
+        if source_agent is None:
+            print("SKIP: shared codex auth requested but no codex auth_jsons configured")
+            raise SystemExit(0)
+
+        shared_profiles_path.parent.mkdir(parents=True, exist_ok=True)
+        current_shared = load_profile_file(shared_profiles_path)
+        desired_shared = desired_agent_data(source_agent, current_shared)
+        if desired_shared != current_shared:
+            if shared_profiles_path.exists() or shared_profiles_path.is_symlink():
+                backup = shared_profiles_path.with_suffix(shared_profiles_path.suffix + ".bak")
+                try:
+                    shutil.copy2(shared_profiles_path, backup)
+                except Exception:
+                    pass
+            shared_profiles_path.write_text(json.dumps(desired_shared, indent=2) + "\n")
+            shared_profiles_path.chmod(0o600)
+            changed_agents.append("shared")
+
+        for agent_dir in agent_dirs:
+            profiles_path = agent_dir / "agent" / "auth-profiles.json"
+            profiles_path.parent.mkdir(parents=True, exist_ok=True)
+            desired_target = os.path.relpath(shared_profiles_path, profiles_path.parent)
+            if profiles_path.is_symlink() and os.readlink(profiles_path) == desired_target:
+                continue
+            if profiles_path.exists() or profiles_path.is_symlink():
+                backup = profiles_path.with_suffix(profiles_path.suffix + ".bak")
+                try:
+                    if profiles_path.is_symlink():
+                        backup.write_text(f"symlink:{os.readlink(profiles_path)}\n")
+                    else:
+                        shutil.copy2(profiles_path, backup)
+                except Exception:
+                    pass
+                profiles_path.unlink()
+            profiles_path.symlink_to(desired_target)
+            changed_agents.append(agent_dir.name)
+
+        if changed_agents:
+            print("CHANGED: " + ", ".join(changed_agents))
+        else:
+            print("OK")
+        raise SystemExit(0)
+
+    for agent_dir in agent_dirs:
         profiles_path = agent_dir / "agent" / "auth-profiles.json"
         if not profiles_path.exists():
             continue
 
-        content = profiles_path.read_text().strip()
-        try:
-            data = json.loads(content) if content else {}
-        except json.JSONDecodeError:
-            data = {}
-
-        profiles = data.get("profiles", {})
-        original_profiles = dict(profiles)
-
-        # Ensure setup token profile exists with current token
-        desired_default = {"type": "token", "provider": "anthropic", "token": token}
-        if profiles.get("anthropic:default") != desired_default:
-            profiles["anthropic:default"] = desired_default
-
-        # Remove legacy api-key profile
-        profiles.pop("anthropic:api-key", None)
-
-        if profiles != original_profiles or not content:
-            data["version"] = 1
-            data["profiles"] = profiles
-            if "lastGood" not in data:
-                data["lastGood"] = {"anthropic": "anthropic:default"}
-            profiles_path.write_text(json.dumps(data, indent=2) + "\n")
+        data = load_profile_file(profiles_path)
+        desired = desired_agent_data(agent_dir.name, data)
+        if desired != data:
+            profiles_path.write_text(json.dumps(desired, indent=2) + "\n")
             profiles_path.chmod(0o600)
             changed_agents.append(agent_dir.name)
 
@@ -512,3 +747,9 @@
   register: auth_profiles_result
   changed_when: "'CHANGED:' in auth_profiles_result.stdout"
   notify: restart openclaw-gateway
+
+- name: Clean up Codex auth-profiles temp file
+  ansible.builtin.file:
+    path: /tmp/ansible-codex-accounts
+    state: absent
+  changed_when: false

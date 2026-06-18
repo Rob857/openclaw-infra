@@ -1,0 +1,196 @@
+#!/usr/bin/env node
+
+const os = require("os");
+const path = require("path");
+const { pathToFileURL } = require("url");
+const { spawnSync } = require("child_process");
+
+const ACCOUNT = process.env.GOG_ACCOUNT_EMAIL || "";
+const GOG_BIN = process.env.GOG_BIN || "gog";
+const KEYRING_PASSWORD = process.env.GOG_KEYRING_PASSWORD || "";
+const SDK_ROOT =
+  process.env.MCP_SDK_ROOT || "/home/ubuntu/.openclaw/extensions/openclaw-mcp-adapter/node_modules";
+const TMP_ROOT = process.env.GMAIL_MAIN_TMPDIR || path.join(os.tmpdir(), "gmail-main-mcp");
+
+if (!ACCOUNT) {
+  console.error("GOG_ACCOUNT_EMAIL is required");
+  process.exit(1);
+}
+
+function gog(args, { expectJson = true } = {}) {
+  const env = {
+    ...process.env,
+    ...(KEYRING_PASSWORD ? { GOG_KEYRING_PASSWORD: KEYRING_PASSWORD } : {}),
+  };
+  const res = spawnSync(GOG_BIN, ["-a", ACCOUNT, ...args], {
+    encoding: "utf8",
+    env,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (res.status !== 0) {
+    const stderr = (res.stderr || res.stdout || "gog command failed").trim();
+    throw new Error(stderr);
+  }
+  const stdout = (res.stdout || "").trim();
+  if (!expectJson) return stdout;
+  if (!stdout) return {};
+  return JSON.parse(stdout);
+}
+
+function asSuccess(text) {
+  return { content: [{ type: "text", text }] };
+}
+
+function asError(message) {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+function truncate(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function listFromSearchResult(result) {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.threads)) return result.threads;
+  if (Array.isArray(result.messages)) return result.messages;
+  if (Array.isArray(result.items)) return result.items;
+  return [];
+}
+
+function summarizeThreads(result) {
+  const threads = listFromSearchResult(result);
+  if (threads.length === 0) {
+    return `No Gmail threads found.\n\nRaw result:\n${JSON.stringify(result, null, 2)}`;
+  }
+
+  return threads
+    .map((thread, idx) => {
+      const id = thread.threadId || thread.id || "unknown";
+      const subject = thread.subject || thread.snippet || "(no subject)";
+      const from = thread.from || thread.sender || "";
+      const date = thread.date || thread.internalDate || thread.lastMessageDate || "";
+      const snippet = thread.snippet || "";
+      return [
+        `${idx + 1}. ${subject}`,
+        `   threadId: ${id}`,
+        from ? `   from: ${from}` : "",
+        date ? `   date: ${date}` : "",
+        snippet ? `   snippet: ${snippet}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+}
+
+async function main() {
+  const [{ McpServer }, { StdioServerTransport }, { z }] = await Promise.all([
+    import(pathToFileURL(path.join(SDK_ROOT, "@modelcontextprotocol/sdk/dist/esm/server/mcp.js")).href),
+    import(pathToFileURL(path.join(SDK_ROOT, "@modelcontextprotocol/sdk/dist/esm/server/stdio.js")).href),
+    import(pathToFileURL(path.join(SDK_ROOT, "zod/index.js")).href),
+  ]);
+
+  const server = new McpServer({ name: "gmail-main-mcp", version: "0.1.0" });
+
+  server.registerTool(
+    "search_mail",
+    {
+      description:
+        "Search Gmail threads for the main Gmail account using Gmail query syntax, for example from:, to:, subject:, label:, newer_than:.",
+      inputSchema: {
+        query: z.string().min(1),
+        max: z.number().int().min(1).max(25).optional(),
+      },
+    },
+    async ({ query, max }) => {
+      try {
+        const result = gog([
+          "gmail",
+          "search",
+          query,
+          "--json",
+          "--no-input",
+          "--max",
+          String(max || 10),
+        ]);
+        return asSuccess(summarizeThreads(result));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_thread",
+    {
+      description: "Read a Gmail thread with all messages. Returns a truncated JSON transcript.",
+      inputSchema: {
+        threadId: z.string().min(1),
+        full: z.boolean().optional(),
+        maxChars: z.number().int().min(1000).max(200000).optional(),
+      },
+    },
+    async ({ threadId, full, maxChars }) => {
+      try {
+        const result = gog([
+          "gmail",
+          "thread",
+          "get",
+          threadId,
+          "--json",
+          "--no-input",
+          ...(full === false ? [] : ["--full"]),
+        ]);
+        const rendered = truncate(JSON.stringify(result, null, 2), Math.max(1000, Number(maxChars || 40000)));
+        return asSuccess(rendered);
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "send_mail",
+    {
+      description: "Send an email from the main configured Gmail account.",
+      inputSchema: {
+        to: z.string().min(1),
+        subject: z.string().min(1),
+        body: z.string().min(1),
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
+      },
+    },
+    async ({ to, subject, body, cc, bcc }) => {
+      try {
+        const args = [
+          "gmail",
+          "send",
+          "--json",
+          "--no-input",
+          "--to",
+          to,
+          "--subject",
+          subject,
+          "--body",
+          body,
+        ];
+        if (cc) args.push("--cc", cc);
+        if (bcc) args.push("--bcc", bcc);
+        const result = gog(args);
+        return asSuccess(JSON.stringify(result, null, 2));
+      } catch (error) {
+        return asError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch((error) => {
+  console.error("gmail-main-mcp failed:", error);
+  process.exit(1);
+});

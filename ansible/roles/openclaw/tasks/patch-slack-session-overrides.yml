@@ -1,0 +1,119 @@
+---
+# Patch sticky Slack session overrides in OpenClaw runtime.
+# Upstream persists session-scoped auth/model overrides in Slack sessions and
+# reuses them on later messages. This can override agent/global defaults and
+# break failover behavior. Fix: for Slack sessions, ignore and clear persisted
+# auth/model override fields.
+
+- name: Find session-override bundle files to patch
+  ansible.builtin.shell: |
+    ls /home/ubuntu/.npm-global/lib/node_modules/openclaw/dist/session-override-*.js 2>/dev/null || true
+  register: slack_override_session_files
+  changed_when: false
+
+- name: Find gateway-cli bundle files to patch
+  ansible.builtin.shell: |
+    ls /home/ubuntu/.npm-global/lib/node_modules/openclaw/dist/gateway-cli-*.js 2>/dev/null || true
+  register: slack_override_gateway_files
+  changed_when: false
+
+- name: Check if sticky Slack session patch is needed
+  ansible.builtin.shell: |
+    for f in {% for p in slack_override_session_files.stdout_lines %}"{{ p }}" {% endfor %}; do
+      if ! grep -q 'ignoreStickySlackOverrides' "$f" 2>/dev/null; then
+        echo "NEEDS_PATCH: $f"
+      fi
+    done
+    for f in {% for p in slack_override_gateway_files.stdout_lines %}"{{ p }}" {% endfor %}; do
+      if grep -q 'ignoreStickySlackOverrides' "$f" 2>/dev/null || grep -q 'primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.providerOverride' "$f" 2>/dev/null; then
+        :
+      else
+        echo "NEEDS_PATCH: $f"
+      fi
+    done
+  register: slack_override_patch_check
+  changed_when: false
+  when: (slack_override_session_files.stdout | length > 0) or (slack_override_gateway_files.stdout | length > 0)
+
+- name: Apply sticky Slack session patch
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 <<'PYEOF'
+    from pathlib import Path
+
+    session_files = [{% for p in slack_override_session_files.stdout_lines %}"{{ p }}",{% endfor %}]
+    gateway_files = [{% for p in slack_override_gateway_files.stdout_lines %}"{{ p }}",{% endfor %}]
+
+    session_old = """async function resolveSessionAuthProfileOverride(params) {\n\tconst { cfg, provider, agentDir, sessionEntry, sessionStore, sessionKey, storePath, isNewSession } = params;\n\tif (!sessionEntry || !sessionStore || !sessionKey) return sessionEntry?.authProfileOverride;\n\tconst store = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });\n"""
+    session_new = """async function resolveSessionAuthProfileOverride(params) {\n\tconst { cfg, provider, agentDir, sessionEntry, sessionStore, sessionKey, storePath, isNewSession } = params;\n\tif (!sessionEntry || !sessionStore || !sessionKey) return sessionEntry?.authProfileOverride;\n\tconst ignoreStickySlackOverrides = sessionEntry?.channel === \"slack\" || sessionEntry?.deliveryContext?.channel === \"slack\" || sessionKey?.includes(\":slack:\");\n\tif (ignoreStickySlackOverrides) {\n\t\tif (sessionEntry.authProfileOverride || sessionEntry.authProfileOverrideSource || sessionEntry.authProfileOverrideCompactionCount !== void 0) await clearSessionAuthProfileOverride({\n\t\t\tsessionEntry,\n\t\t\tsessionStore,\n\t\t\tsessionKey,\n\t\t\tstorePath\n\t\t});\n\t\treturn;\n\t}\n\tconst store = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });\n"""
+
+    gateway_old = """\t\t\tresponseUsage: currentEntry?.responseUsage,\n\t\t\tproviderOverride: currentEntry?.providerOverride,\n\t\t\tmodelOverride: currentEntry?.modelOverride,\n\t\t\tauthProfileOverride: currentEntry?.authProfileOverride,\n\t\t\tauthProfileOverrideSource: currentEntry?.authProfileOverrideSource,\n\t\t\tauthProfileOverrideCompactionCount: currentEntry?.authProfileOverrideCompactionCount,\n\t\t\tgroupActivation: currentEntry?.groupActivation,\n"""
+    gateway_new = """\t\t\tresponseUsage: currentEntry?.responseUsage,\n\t\t\tproviderOverride: /* ignoreStickySlackOverrides */ currentEntry?.channel === \"slack\" || currentEntry?.deliveryContext?.channel === \"slack\" || primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.providerOverride,\n\t\t\tmodelOverride: /* ignoreStickySlackOverrides */ currentEntry?.channel === \"slack\" || currentEntry?.deliveryContext?.channel === \"slack\" || primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.modelOverride,\n\t\t\tauthProfileOverride: /* ignoreStickySlackOverrides */ currentEntry?.channel === \"slack\" || currentEntry?.deliveryContext?.channel === \"slack\" || primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.authProfileOverride,\n\t\t\tauthProfileOverrideSource: /* ignoreStickySlackOverrides */ currentEntry?.channel === \"slack\" || currentEntry?.deliveryContext?.channel === \"slack\" || primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.authProfileOverrideSource,\n\t\t\tauthProfileOverrideCompactionCount: /* ignoreStickySlackOverrides */ currentEntry?.channel === \"slack\" || currentEntry?.deliveryContext?.channel === \"slack\" || primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.authProfileOverrideCompactionCount,\n\t\t\tgroupActivation: currentEntry?.groupActivation,\n"""
+
+    patched = []
+
+    for raw in session_files:
+        path = Path(raw)
+        if not path.exists():
+            continue
+        text = path.read_text()
+        original = text
+        if "ignoreStickySlackOverrides" not in text:
+            text = text.replace(session_old, session_new)
+        if text != original:
+            backup = path.with_suffix(path.suffix + ".bak-slack-session-overrides")
+            if not backup.exists():
+                backup.write_text(original)
+            path.write_text(text)
+            print(f"Patched: {path}")
+            patched.append(str(path))
+
+    for raw in gateway_files:
+        path = Path(raw)
+        if not path.exists():
+            continue
+        text = path.read_text()
+        original = text
+        if "ignoreStickySlackOverrides" not in text:
+            text = text.replace(gateway_old, gateway_new)
+        if text != original:
+            backup = path.with_suffix(path.suffix + ".bak-slack-session-overrides")
+            if not backup.exists():
+                backup.write_text(original)
+            path.write_text(text)
+            print(f"Patched: {path}")
+            patched.append(str(path))
+
+    if not patched:
+        print("OK: patch already applied or no target files changed")
+    PYEOF
+  args:
+    executable: /bin/bash
+  register: slack_override_patch_result
+  changed_when: "'Patched' in slack_override_patch_result.stdout"
+  when:
+    - (slack_override_session_files.stdout | length > 0) or (slack_override_gateway_files.stdout | length > 0)
+    - slack_override_patch_check.stdout is defined
+    - "'NEEDS_PATCH' in slack_override_patch_check.stdout"
+  notify: restart openclaw-gateway
+
+- name: Verify sticky Slack session patch applied
+  ansible.builtin.shell: |
+    for f in {% for p in slack_override_session_files.stdout_lines %}"{{ p }}" {% endfor %}; do
+      if grep -q 'ignoreStickySlackOverrides' "$f" 2>/dev/null; then
+        echo "OK: $f"
+      else
+        echo "MISSING: $f"
+      fi
+    done
+    for f in {% for p in slack_override_gateway_files.stdout_lines %}"{{ p }}" {% endfor %}; do
+      if grep -q 'ignoreStickySlackOverrides' "$f" 2>/dev/null || grep -q 'primaryKey?.includes(\":slack:\") ? void 0 : currentEntry?.providerOverride' "$f" 2>/dev/null; then
+        echo "OK: $f"
+      else
+        echo "MISSING: $f"
+      fi
+    done
+  register: slack_override_patch_verify
+  changed_when: false
+  failed_when: "'MISSING' in slack_override_patch_verify.stdout"
+  when: (slack_override_session_files.stdout | length > 0) or (slack_override_gateway_files.stdout | length > 0)

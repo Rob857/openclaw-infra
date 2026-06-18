@@ -26,6 +26,12 @@ function toPascal(id: string): string {
     return id.charAt(0).toUpperCase() + id.slice(1);
 }
 
+// Helper: convert agent IDs to shell-safe env suffixes.
+// e.g., "deepseek-agent" -> "DEEPSEEK_AGENT"
+function toEnvSuffix(id: string): string {
+    return id.replace(/-/g, "_").toUpperCase();
+}
+
 // ============================================
 // Required secrets
 // ============================================
@@ -41,6 +47,7 @@ const telegramBotToken = config.getSecret("telegramBotToken");
 const discordBotToken = config.getSecret("discordBotToken");
 const xaiApiKey = config.getSecret("xaiApiKey");
 const groqApiKey = config.getSecret("groqApiKey");
+const gogKeyringPassword = config.getSecret("gogKeyringPassword");
 const obsidianAuthToken = config.getSecret("obsidianAuthToken");
 const obsidianVaultPassword = config.getSecret("obsidianVaultPassword");
 
@@ -166,6 +173,7 @@ const provisionEnv: Record<string, pulumi.Input<string>> = {
     PROVISION_TAILSCALE_HOSTNAME: serverName,
     PROVISION_XAI_API_KEY: xaiApiKey || "",
     PROVISION_GROQ_API_KEY: groqApiKey || "",
+    PROVISION_GOG_KEYRING_PASSWORD: gogKeyringPassword || "",
     PROVISION_GITHUB_TOKEN: githubToken || "",
     PROVISION_OBSIDIAN_ANDY_VAULT_REPO_URL: obsidianAndyVaultRepoUrl || "",
     PROVISION_OBSIDIAN_AUTH_TOKEN: obsidianAuthToken || "",
@@ -177,7 +185,7 @@ const provisionEnv: Record<string, pulumi.Input<string>> = {
 
 // Add per-agent env vars
 for (const id of agentIds) {
-    const upper = id.toUpperCase();
+    const upper = toEnvSuffix(id);
     const cfg = agentConfig[id];
     provisionEnv[`PROVISION_GITHUB_TOKEN_${upper}`] = cfg.githubToken || "";
     provisionEnv[`PROVISION_TELEGRAM_${upper}_USER_ID`] =

@@ -59,6 +59,22 @@
         {% else %}
         {%   set guild_entry = {"requireMention": false} %}
         {% endif %}
+        {% if openclaw_discord_channels is defined and openclaw_discord_channels | length > 0 %}
+        {%   set channels_obj = {} %}
+        {%   for _channel_name, _channel in openclaw_discord_channels.items() %}
+        {%     if _channel.id is defined and _channel.id | string | length > 0 %}
+        {%       set _ = channels_obj.update({
+                  (_channel.id | string): {
+                    "allow": (_channel.allow | default(true)),
+                    "requireMention": (_channel.requireMention | default(true))
+                  }
+                }) %}
+        {%     endif %}
+        {%   endfor %}
+        {%   if channels_obj | length > 0 %}
+        {%     set _ = guild_entry.update({"channels": channels_obj}) %}
+        {%   endif %}
+        {% endif %}
         {% set guilds_obj = {discord_guild_id: guild_entry} %}
         DESIRED_GUILDS='{{ guilds_obj | to_json }}'
         CURRENT_GUILDS=$(openclaw config get channels.discord.guilds 2>/dev/null | sed '/^\[mcp-adapter\]/d; /^\[plugins\]/d') || CURRENT_GUILDS="{}"

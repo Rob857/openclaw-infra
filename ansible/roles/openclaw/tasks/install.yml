@@ -28,7 +28,7 @@
 - name: Extract installed semver
   ansible.builtin.set_fact:
     openclaw_installed_semver: >-
-      {{ openclaw_installed_version.stdout | default('') | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('') }}
+      {{ openclaw_installed_version.stdout | default('') | regex_search('[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?') | default('') }}
 
 - name: Set version comparison facts
   ansible.builtin.set_fact:
@@ -73,7 +73,7 @@
     - name: Confirm installed version matches target
       ansible.builtin.assert:
         that:
-          - (openclaw_post_install_version.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') | default('')) == openclaw_version
+          - (openclaw_post_install_version.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.]+)?') | default('')) == openclaw_version
         fail_msg: >-
           Version mismatch: installed '{{ openclaw_post_install_version.stdout | trim }}',
           expected '{{ openclaw_version }}'

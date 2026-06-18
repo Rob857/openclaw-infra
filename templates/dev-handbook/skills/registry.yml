@@ -1,0 +1,13 @@
+skills:
+  - id: architecture-review
+    path: skills/architecture-review/SKILL.md
+  - id: flutter-code-review
+    path: skills/flutter-code-review/SKILL.md
+  - id: flutter-issue-implementation
+    path: skills/flutter-issue-implementation/SKILL.md
+  - id: slack-create-issue
+    path: skills/slack-create-issue/SKILL.md
+  - id: operator-orchestrator
+    path: skills/operator-orchestrator/SKILL.md
+  - id: low-cost-research
+    path: skills/low-cost-research/SKILL.md

@@ -112,6 +112,10 @@ ssh ubuntu@openclaw-vps 'XDG_RUNTIME_DIR=/run/user/1000 openclaw agents list --j
 
 Configured via Pulumi secret `discordBotToken` and optional `discordGuildId`/`discordUserId`. If not set, deployment proceeds without Discord. Discord is a built-in channel with native per-channel session isolation — each Discord channel automatically gets its own isolated session context.
 
+Current deployment note:
+
+- See [AGENT-ROUTING-AND-DISCORD-STATUS.md](/Users/robinbeyer/GitMapletics/Mapletics_Organization/openclaw-infra/docs/AGENT-ROUTING-AND-DISCORD-STATUS.md) for the current `main`/`gordon` routing model and the live Discord startup blocker observed on 2026-04-01.
+
 ### Setup
 
 1. **Create a Discord bot** at [Discord Developer Portal](https://discord.com/developers/applications):

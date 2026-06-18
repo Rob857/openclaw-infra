@@ -57,3 +57,59 @@
   notify:
     - reload user systemd
     - restart openclaw-gateway
+
+- name: Ensure OpenClaw gateway systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /home/ubuntu/.config/systemd/user/openclaw-gateway.service.d
+    state: directory
+    mode: "0750"
+  when: gog_keyring_password is defined and gog_keyring_password | length > 0
+
+- name: Configure Gog keyring password for OpenClaw gateway
+  ansible.builtin.copy:
+    dest: /home/ubuntu/.config/systemd/user/openclaw-gateway.service.d/gog-keyring.conf
+    mode: "0600"
+    content: |
+      [Service]
+      Environment="GOG_KEYRING_PASSWORD={{ gog_keyring_password }}"
+  no_log: true
+  when: gog_keyring_password is defined and gog_keyring_password | length > 0
+  notify:
+    - reload user systemd
+    - restart openclaw-gateway
+
+- name: Remove Gog keyring drop-in when no password is configured
+  ansible.builtin.file:
+    path: /home/ubuntu/.config/systemd/user/openclaw-gateway.service.d/gog-keyring.conf
+    state: absent
+  when: gog_keyring_password is not defined or gog_keyring_password | length == 0
+  notify:
+    - reload user systemd
+    - restart openclaw-gateway
+
+- name: Check Gog binary location
+  ansible.builtin.stat:
+    path: /usr/local/bin/gog
+  register: gog_usr_local_bin
+  when: gog_keyring_password is defined and gog_keyring_password | length > 0
+
+- name: Install Gog keyring wrapper for direct CLI use
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ ! -x /usr/local/lib/gog-bin/gog ]; then
+      mkdir -p /usr/local/lib/gog-bin
+      mv /usr/local/bin/gog /usr/local/lib/gog-bin/gog
+    fi
+    cat >/usr/local/bin/gog <<'EOF'
+    #!/usr/bin/env bash
+    export GOG_KEYRING_PASSWORD="${GOG_KEYRING_PASSWORD:-{{ gog_keyring_password }}}"
+    exec /usr/local/lib/gog-bin/gog "$@"
+    EOF
+    chmod 0755 /usr/local/bin/gog
+  args:
+    executable: /bin/bash
+  no_log: true
+  when:
+    - gog_keyring_password is defined
+    - gog_keyring_password | length > 0
+    - gog_usr_local_bin.stat.exists | default(false)

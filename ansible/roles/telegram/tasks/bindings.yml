@@ -1,23 +1,26 @@
 ---
-# Configure agent bindings — route Telegram DMs and groups to the correct agent.
-# Uses the root-level `bindings` config path.
+# Configure agent bindings.
+# If `openclaw_bindings` is defined, use that exact list verbatim.
+# Otherwise derive legacy bindings from agent delivery targets.
 
 - name: Initialize bindings list
   ansible.builtin.set_fact:
-    _telegram_bindings: []
+    _desired_bindings: "{{ openclaw_bindings | default([]) }}"
 
-- name: Build binding entries
+- name: Build legacy binding entries
   ansible.builtin.set_fact:
-    _telegram_bindings: "{{ _telegram_bindings + [{'agentId': item.id, 'match': {'channel': item.deliver_channel | default('telegram'), 'peer': {'kind': item.deliver_type, 'id': item.deliver_to | string}}}] }}"
+    _desired_bindings: "{{ _desired_bindings + [{'agentId': item.id, 'match': {'channel': item.deliver_channel | default('telegram'), 'peer': {'kind': item.deliver_type, 'id': item.deliver_to | string}}}] }}"
   loop: "{{ openclaw_agents | selectattr('is_default', 'equalto', false) | list }}"
   loop_control:
     label: "{{ item.id }}"
-  when: item.deliver_to | default('') | length > 0
+  when:
+    - openclaw_bindings is not defined
+    - item.deliver_to | default('') | length > 0
 
 - block:
     - name: Write bindings JSON to temp file
       ansible.builtin.copy:
-        content: "{{ _telegram_bindings | to_json }}"
+        content: "{{ _desired_bindings | to_json }}"
         dest: /tmp/ansible_bindings.json
         mode: '0600'
       changed_when: false
@@ -54,7 +57,7 @@
         path: /tmp/ansible_bindings.json
         state: absent
       changed_when: false
-  when: _telegram_bindings | length > 0
+  when: _desired_bindings | length > 0
 
 - name: Clear agent bindings
   ansible.builtin.shell: |
@@ -67,7 +70,7 @@
   args:
     executable: /bin/bash
   changed_when: false
-  when: _telegram_bindings | length == 0
+  when: _desired_bindings | length == 0
 
 - name: Verify bindings
   ansible.builtin.shell: |

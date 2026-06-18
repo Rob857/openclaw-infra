@@ -46,7 +46,8 @@
       vars:
         _name: "{{ item.0.name_prefix if item.1.id == 'main' else item.0.name_prefix ~ '-' ~ item.1.id }}"
         _cwd: "{{ '/home/ubuntu/.openclaw/workspace' if item.1.id == 'main' else '/home/ubuntu/.openclaw/workspace-' ~ item.1.id }}"
-        _token_var: "{{ 'github_token' if item.1.id == 'main' else 'github_token_' ~ item.1.id }}"
+        _safe_id: "{{ item.1.id | replace('-', '_') }}"
+        _token_var: "{{ 'github_token' if item.1.id == 'main' else 'github_token_' ~ _safe_id }}"
         _entry: >-
           {{ {'name': _name, 'type': item.0.type, 'agent_id': item.1.id}
              | combine({'cwd': _cwd} if item.0.type in ['codex', 'claude-code', 'pi', 'qmd'] else {})
@@ -55,6 +56,146 @@
       loop_control:
         label: "{{ _name }}"
       when: openclaw_mcp_servers is not defined
+      tags: [always]
+
+    - name: Add optional Gordon Notion connector
+      ansible.builtin.set_fact:
+        _openclaw_mcp_servers: "{{ _openclaw_mcp_servers + [_entry] }}"
+      vars:
+        _entry: >-
+          {{
+            {
+              'name': 'notion-gordon',
+              'type': 'custom-' ~ notion_gordon_transport,
+              'agent_id': 'gordon'
+            }
+            | combine(
+                {
+                  'command': notion_gordon_command,
+                  'args': notion_gordon_args | default([]),
+                  'env': notion_gordon_env | default({})
+                }
+                if notion_gordon_transport == 'stdio' else
+                {
+                  'url': notion_gordon_url,
+                  'allow_private_urls': notion_gordon_allow_private_urls | default(false),
+                  'timeout': notion_gordon_timeout | default(300000)
+                }
+              )
+          }}
+      when:
+        - openclaw_mcp_servers is not defined
+        - notion_gordon_enabled | default(false) | bool
+        - "'gordon' in (openclaw_agents | map(attribute='id') | list)"
+        - >
+          (notion_gordon_transport == 'stdio' and (notion_gordon_command | default('') | length > 0))
+          or
+          (notion_gordon_transport == 'http' and (notion_gordon_url | default('') | length > 0))
+      tags: [always]
+
+    - name: Add optional Gordon Google Drive connector
+      ansible.builtin.set_fact:
+        _openclaw_mcp_servers: "{{ _openclaw_mcp_servers + [_entry] }}"
+      vars:
+        _entry: >-
+          {{
+            {
+              'name': 'gdrive-gordon',
+              'type': 'custom-' ~ gdrive_gordon_transport,
+              'agent_id': 'gordon'
+            }
+            | combine(
+                {
+                  'command': gdrive_gordon_command,
+                  'args': gdrive_gordon_args | default([]),
+                  'env': gdrive_gordon_env | default({})
+                }
+                if gdrive_gordon_transport == 'stdio' else
+                {
+                  'url': gdrive_gordon_url,
+                  'allow_private_urls': gdrive_gordon_allow_private_urls | default(false),
+                  'timeout': gdrive_gordon_timeout | default(300000)
+                }
+              )
+          }}
+      when:
+        - openclaw_mcp_servers is not defined
+        - gdrive_gordon_enabled | default(false) | bool
+        - "'gordon' in (openclaw_agents | map(attribute='id') | list)"
+        - >
+          (gdrive_gordon_transport == 'stdio' and (gdrive_gordon_command | default('') | length > 0))
+          or
+          (gdrive_gordon_transport == 'http' and (gdrive_gordon_url | default('') | length > 0))
+      tags: [always]
+
+    - name: Add optional Main Google Drive connector
+      ansible.builtin.set_fact:
+        _openclaw_mcp_servers: "{{ _openclaw_mcp_servers + [_entry] }}"
+      vars:
+        _entry: >-
+          {{
+            {
+              'name': 'gdrive-main',
+              'type': 'custom-' ~ gdrive_main_transport,
+              'agent_id': 'main'
+            }
+            | combine(
+                {
+                  'command': gdrive_main_command,
+                  'args': gdrive_main_args | default([]),
+                  'env': gdrive_main_env | default({})
+                }
+                if gdrive_main_transport == 'stdio' else
+                {
+                  'url': gdrive_main_url,
+                  'allow_private_urls': gdrive_main_allow_private_urls | default(false),
+                  'timeout': gdrive_main_timeout | default(300000)
+                }
+              )
+          }}
+      when:
+        - openclaw_mcp_servers is not defined
+        - gdrive_main_enabled | default(false) | bool
+        - "'main' in (openclaw_agents | map(attribute='id') | list)"
+        - >
+          (gdrive_main_transport == 'stdio' and (gdrive_main_command | default('') | length > 0))
+          or
+          (gdrive_main_transport == 'http' and (gdrive_main_url | default('') | length > 0))
+      tags: [always]
+
+    - name: Add optional Main Gmail connector
+      ansible.builtin.set_fact:
+        _openclaw_mcp_servers: "{{ _openclaw_mcp_servers + [_entry] }}"
+      vars:
+        _entry: >-
+          {{
+            {
+              'name': 'gmail-main',
+              'type': 'custom-' ~ gmail_main_transport,
+              'agent_id': 'main'
+            }
+            | combine(
+                {
+                  'command': gmail_main_command,
+                  'args': gmail_main_args | default([]),
+                  'env': gmail_main_env | default({})
+                }
+                if gmail_main_transport == 'stdio' else
+                {
+                  'url': gmail_main_url,
+                  'allow_private_urls': gmail_main_allow_private_urls | default(false),
+                  'timeout': gmail_main_timeout | default(300000)
+                }
+              )
+          }}
+      when:
+        - openclaw_mcp_servers is not defined
+        - gmail_main_enabled | default(false) | bool
+        - "'main' in (openclaw_agents | map(attribute='id') | list)"
+        - >
+          (gmail_main_transport == 'stdio' and (gmail_main_command | default('') | length > 0))
+          or
+          (gmail_main_transport == 'http' and (gmail_main_url | default('') | length > 0))
       tags: [always]
 
     # Workspaces: one per agent with mechanical naming
@@ -68,8 +209,9 @@
       ansible.builtin.set_fact:
         _openclaw_workspaces: "{{ (_openclaw_workspaces | default([])) + [_entry] }}"
       vars:
-        _repo_var: "{{ 'workspace_repo_url' if item.id == 'main' else 'workspace_' ~ item.id ~ '_repo_url' }}"
-        _key_var: "{{ 'workspace_deploy_key' if item.id == 'main' else 'workspace_' ~ item.id ~ '_deploy_key' }}"
+        _safe_id: "{{ item.id | replace('-', '_') }}"
+        _repo_var: "{{ 'workspace_repo_url' if item.id == 'main' else 'workspace_' ~ _safe_id ~ '_repo_url' }}"
+        _key_var: "{{ 'workspace_deploy_key' if item.id == 'main' else 'workspace_' ~ _safe_id ~ '_deploy_key' }}"
         _entry:
           agent_id: "{{ item.id }}"
           repo_url: "{{ lookup('vars', _repo_var, default='') }}"
@@ -153,7 +295,8 @@
           {{ (_openclaw_obsidian_github_tokens | default({}))
              | combine({item.id: lookup('vars', _token_var, default='')}) }}
       vars:
-        _token_var: "{{ 'github_token' if item.id == 'main' else 'github_token_' ~ item.id }}"
+        _safe_id: "{{ item.id | replace('-', '_') }}"
+        _token_var: "{{ 'github_token' if item.id == 'main' else 'github_token_' ~ _safe_id }}"
       loop: "{{ openclaw_agents }}"
       loop_control:
         label: "{{ item.id }}"
@@ -206,6 +349,7 @@
     - role: agents
       tags: [agents]
       when: >-
+        (openclaw_agents | selectattr('is_default', 'equalto', false) | list | length > 0) or
         (telegram_bot_token is defined and telegram_bot_token | length > 0) or
         (openclaw_agents | selectattr('deliver_channel', 'defined')
           | selectattr('deliver_channel', 'equalto', 'whatsapp') | list | length > 0) or

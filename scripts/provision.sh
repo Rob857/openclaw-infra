@@ -27,6 +27,51 @@ read_env() {
     eval "printf '%s' \"\${$1:-}\""
 }
 
+# Convert an agent id like "deepseek-agent" to a safe shell env suffix like
+# "DEEPSEEK_AGENT" so per-agent secrets can be exported and read reliably.
+agent_env_suffix() {
+    printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_'
+}
+
+# Pulumi historically exported per-agent env vars using the raw uppercased agent
+# ID (for example DEEPSEEK-AGENT). Normalize those legacy names to the shell-safe
+# underscore form expected everywhere else in this script.
+normalize_legacy_agent_env() {
+    local agent_id="$1"
+    local safe_suffix legacy_suffix desired legacy value
+
+    safe_suffix="$(agent_env_suffix "$agent_id")"
+    legacy_suffix="$(printf '%s' "$agent_id" | tr '[:lower:]' '[:upper:]')"
+
+    normalize_one() {
+        desired="$1"
+        legacy="$2"
+        value="$(printenv "$desired" 2>/dev/null || true)"
+        if [ -n "$value" ]; then
+            return 0
+        fi
+        value="$(printenv "$legacy" 2>/dev/null || true)"
+        if [ -n "$value" ]; then
+            export "$desired=$value"
+        fi
+    }
+
+    normalize_one "PROVISION_GITHUB_TOKEN_${safe_suffix}" \
+        "PROVISION_GITHUB_TOKEN_${legacy_suffix}"
+    normalize_one "PROVISION_TELEGRAM_${safe_suffix}_USER_ID" \
+        "PROVISION_TELEGRAM_${legacy_suffix}_USER_ID"
+    normalize_one "PROVISION_TELEGRAM_${safe_suffix}_GROUP_ID" \
+        "PROVISION_TELEGRAM_${legacy_suffix}_GROUP_ID"
+    normalize_one "PROVISION_WHATSAPP_${safe_suffix}_PHONE" \
+        "PROVISION_WHATSAPP_${legacy_suffix}_PHONE"
+    normalize_one "PROVISION_WORKSPACE_${safe_suffix}_REPO_URL" \
+        "PROVISION_WORKSPACE_${legacy_suffix}_REPO_URL"
+    normalize_one "PROVISION_WORKSPACE_${safe_suffix}_DEPLOY_KEY" \
+        "PROVISION_WORKSPACE_${legacy_suffix}_DEPLOY_KEY"
+    normalize_one "PROVISION_OBSIDIAN_${safe_suffix}_VAULT_REPO_URL" \
+        "PROVISION_OBSIDIAN_${legacy_suffix}_VAULT_REPO_URL"
+}
+
 echo "=== Reading secrets ==="
 
 # Read agent IDs — from Pulumi env var (set during `pulumi up`) or Pulumi CLI (day-2 manual runs)
@@ -62,7 +107,10 @@ else
     export PROVISION_WORKSPACE_REPO_URL=$(pulumi config get workspaceRepoUrl 2>/dev/null || echo "")
     export PROVISION_TAILSCALE_HOSTNAME=$(pulumi stack output tailscaleHostname 2>/dev/null || echo "openclaw-vps")
     export PROVISION_XAI_API_KEY=$(pulumi config get xaiApiKey 2>/dev/null || echo "")
+    export PROVISION_OPENROUTER_API_KEY=$(pulumi config get openrouterApiKey 2>/dev/null || echo "")
+    export PROVISION_DEEPSEEK_API_KEY=$(pulumi config get deepseekApiKey 2>/dev/null || echo "")
     export PROVISION_GROQ_API_KEY=$(pulumi config get groqApiKey 2>/dev/null || echo "")
+    export PROVISION_GOG_KEYRING_PASSWORD=$(pulumi config get gogKeyringPassword 2>/dev/null || echo "")
     export PROVISION_GITHUB_TOKEN=$(pulumi config get githubToken 2>/dev/null || echo "")
     export PROVISION_OBSIDIAN_ANDY_VAULT_REPO_URL=$(pulumi config get obsidianAndyVaultRepoUrl 2>/dev/null || echo "")
     export PROVISION_OBSIDIAN_AUTH_TOKEN=$(pulumi config get obsidianAuthToken 2>/dev/null || echo "")
@@ -82,10 +130,13 @@ else
 
     # Per-agent config (from Pulumi CLI)
     export PROVISION_AGENT_IDS="$agent_ids_str"
-    IFS=',' read -ra _cli_agents <<< "$agent_ids_str"
-    for _id in "${_cli_agents[@]}"; do
+    _cli_agents=()
+    if [ -n "$agent_ids_str" ]; then
+        IFS=',' read -ra _cli_agents <<< "$agent_ids_str"
+    fi
+    for _id in "${_cli_agents[@]+"${_cli_agents[@]}"}"; do
         [ -z "$_id" ] && continue
-        _upper=$(echo "$_id" | tr '[:lower:]' '[:upper:]')
+        _upper=$(agent_env_suffix "$_id")
         _pascal=$(echo "$_id" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
 
         export "PROVISION_GITHUB_TOKEN_${_upper}=$(pulumi config get "githubToken${_pascal}" 2>/dev/null || echo "")"
@@ -108,6 +159,12 @@ agent_ids=()
 if [ -n "$agent_ids_str" ]; then
     IFS=',' read -ra agent_ids <<< "$agent_ids_str"
 fi
+
+# Accept both current shell-safe env names and Pulumi's older hyphenated names.
+for id in "${agent_ids[@]+"${agent_ids[@]}"}"; do
+    [ -z "$id" ] && continue
+    normalize_legacy_agent_env "$id"
+done
 
 # Validate required secrets
 gateway_token=$(read_env PROVISION_GATEWAY_TOKEN)
@@ -145,7 +202,7 @@ validate_deploy_key "workspace (main)" \
 if [ -n "$agent_ids_str" ]; then
     for id in "${agent_ids[@]}"; do
         [ -z "$id" ] && continue
-        upper=$(echo "$id" | tr '[:lower:]' '[:upper:]')
+        upper=$(agent_env_suffix "$id")
         validate_deploy_key "workspace ($id)" \
             "$(read_env "PROVISION_WORKSPACE_${upper}_REPO_URL")" \
             "$(read_env "PROVISION_WORKSPACE_${upper}_DEPLOY_KEY")"
@@ -159,6 +216,8 @@ echo "  telegram: $([ -n "$(read_env PROVISION_TELEGRAM_BOT_TOKEN)" ] && echo "c
 echo "  discord: $([ -n "$(read_env PROVISION_DISCORD_BOT_TOKEN)" ] && echo "configured" || echo "skipped")"
 echo "  workspace_sync (main): $([ -n "$(read_env PROVISION_WORKSPACE_REPO_URL)" ] && echo "configured" || echo "skipped")"
 echo "  grok_search: $([ -n "$(read_env PROVISION_XAI_API_KEY)" ] && echo "configured" || echo "skipped")"
+echo "  openrouter: $([ -n "$(read_env PROVISION_OPENROUTER_API_KEY)" ] && echo "configured" || echo "skipped")"
+echo "  deepseek: $([ -n "$(read_env PROVISION_DEEPSEEK_API_KEY)" ] && echo "configured" || echo "skipped")"
 echo "  groq_voice: $([ -n "$(read_env PROVISION_GROQ_API_KEY)" ] && echo "configured" || echo "skipped")"
 echo "  github_mcp (main): $([ -n "$(read_env PROVISION_GITHUB_TOKEN)" ] && echo "configured" || echo "skipped")"
 echo "  obsidian (andy): $([ -n "$(read_env PROVISION_OBSIDIAN_ANDY_VAULT_REPO_URL)" ] && echo "configured" || echo "skipped")"
@@ -166,7 +225,7 @@ echo "  obsidian_headless: $([ -n "$(read_env PROVISION_OBSIDIAN_AUTH_TOKEN)" ] 
 if [ -n "$agent_ids_str" ]; then
     for id in "${agent_ids[@]}"; do
         [ -z "$id" ] && continue
-        upper=$(echo "$id" | tr '[:lower:]' '[:upper:]')
+        upper=$(agent_env_suffix "$id")
         [ -n "$(read_env "PROVISION_TELEGRAM_${upper}_USER_ID")" ] && echo "  telegram_${id}: configured"
         [ -n "$(read_env "PROVISION_TELEGRAM_${upper}_GROUP_ID")" ] && echo "  telegram_${id}_group: configured"
         [ -n "$(read_env "PROVISION_WHATSAPP_${upper}_PHONE")" ] && echo "  whatsapp_${id}: configured"
@@ -189,6 +248,75 @@ if [ -f "$CODEX_AUTH_FILE" ]; then
 fi
 echo "  codex_auth: $([ -n "$codex_auth_json" ] && echo "found (~/.codex/auth.json)" || echo "skipped (run 'codex login' to enable)")"
 
+# Optional multi-account Codex rotation:
+# Save auth snapshots locally using their email address in the filename.
+# The simple 3-account layout is:
+#   sanjicook803@gmail.com
+#   info@mapletics.com
+#   rbeyer1 (any local auth-rbeyer1*.json file)
+# Provision uses these agent-specific priorities:
+#   main / manfred -> rbeyer1 only
+#   gordon         -> rbeyer1, sanji, info
+#   others         -> sanji, info, rbeyer1
+read_codex_auth_file() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        local content
+        content=$(cat "$file")
+        if [ -n "$content" ] && ! echo "$content" | jq empty 2>/dev/null; then
+            echo "ERROR: $file is not valid JSON. Run 'codex login' again and re-save it."
+            exit 1
+        fi
+        printf '%s' "$content"
+    fi
+    return 0
+}
+
+codex_auth_sanji="$(read_codex_auth_file "${HOME}/.codex/auth-sanjicook803@gmail.com.json")"
+codex_auth_info="$(read_codex_auth_file "${HOME}/.codex/auth-info@mapletics.com.json")"
+
+read_codex_auth_first_match() {
+    local pattern="$1"
+    local matches=()
+    local file
+    shopt -s nullglob
+    for file in "${HOME}"/.codex/$pattern; do
+        matches+=("$file")
+    done
+    shopt -u nullglob
+    if [ "${#matches[@]}" -gt 0 ]; then
+        read_codex_auth_file "${matches[0]}"
+    fi
+}
+
+codex_auth_rbeyer1="$(read_codex_auth_first_match 'auth-rbeyer1*.json')"
+if [ -n "$codex_auth_json" ]; then
+    current_codex_email=$(printf '%s' "$codex_auth_json" | jq -r '
+      .tokens.access_token
+      | split(".")[1]
+      | @base64d
+      | fromjson
+      | ."https://api.openai.com/profile".email // ""
+    ' 2>/dev/null || true)
+    if [ "$current_codex_email" = "rbeyer1@smail.uni-koeln.de" ]; then
+        codex_auth_rbeyer1="$codex_auth_json"
+    fi
+fi
+
+multi_codex_enabled=false
+if [ -n "$codex_auth_sanji" ] || [ -n "$codex_auth_info" ] || [ -n "$codex_auth_rbeyer1" ]; then
+    multi_codex_enabled=true
+fi
+echo "  codex_rotation: $([ "$multi_codex_enabled" = true ] && echo "configured (sanji/info/rbeyer1)" || echo "skipped")"
+
+emit_auth_yaml() {
+    local content="$1"
+    if [ -n "$content" ]; then
+        printf '%s\n' '      - |'
+        printf '%s\n' "$content" | sed 's/^/        /'
+    fi
+}
+
 # Write secrets to temp YAML file using Python for safe escaping
 SECRETS_FILE="$SECRETS_DIR/secrets.yml"
 python3 -c "
@@ -203,7 +331,10 @@ static = [
     ('telegram_group_id', 'PROVISION_TELEGRAM_GROUP_ID'),
     ('workspace_repo_url', 'PROVISION_WORKSPACE_REPO_URL'),
     ('xai_api_key', 'PROVISION_XAI_API_KEY'),
+    ('openrouter_api_key', 'PROVISION_OPENROUTER_API_KEY'),
+    ('deepseek_api_key', 'PROVISION_DEEPSEEK_API_KEY'),
     ('groq_api_key', 'PROVISION_GROQ_API_KEY'),
+    ('gog_keyring_password', 'PROVISION_GOG_KEYRING_PASSWORD'),
     ('github_token', 'PROVISION_GITHUB_TOKEN'),
     ('obsidian_andy_vault_repo_url', 'PROVISION_OBSIDIAN_ANDY_VAULT_REPO_URL'),
     ('obsidian_auth_token', 'PROVISION_OBSIDIAN_AUTH_TOKEN'),
@@ -222,14 +353,15 @@ with open(sys.argv[1], 'w') as f:
     # Per-agent keys (derived from PROVISION_AGENT_IDS)
     agent_ids = [a.strip() for a in os.environ.get('PROVISION_AGENT_IDS', '').split(',') if a.strip()]
     for aid in agent_ids:
-        upper = aid.upper()
+        upper = aid.replace('-', '_').upper()
+        safe_aid = aid.replace('-', '_')
         per_agent = [
-            (f'github_token_{aid}', f'PROVISION_GITHUB_TOKEN_{upper}'),
-            (f'telegram_{aid}_user_id', f'PROVISION_TELEGRAM_{upper}_USER_ID'),
-            (f'telegram_{aid}_group_id', f'PROVISION_TELEGRAM_{upper}_GROUP_ID'),
-            (f'whatsapp_{aid}_phone', f'PROVISION_WHATSAPP_{upper}_PHONE'),
-            (f'workspace_{aid}_repo_url', f'PROVISION_WORKSPACE_{upper}_REPO_URL'),
-            (f'obsidian_{aid}_vault_repo_url', f'PROVISION_OBSIDIAN_{upper}_VAULT_REPO_URL'),
+            (f'github_token_{safe_aid}', f'PROVISION_GITHUB_TOKEN_{upper}'),
+            (f'telegram_{safe_aid}_user_id', f'PROVISION_TELEGRAM_{upper}_USER_ID'),
+            (f'telegram_{safe_aid}_group_id', f'PROVISION_TELEGRAM_{upper}_GROUP_ID'),
+            (f'whatsapp_{safe_aid}_phone', f'PROVISION_WHATSAPP_{upper}_PHONE'),
+            (f'workspace_{safe_aid}_repo_url', f'PROVISION_WORKSPACE_{upper}_REPO_URL'),
+            (f'obsidian_{safe_aid}_vault_repo_url', f'PROVISION_OBSIDIAN_{upper}_VAULT_REPO_URL'),
         ]
         for yaml_key, env_var in per_agent:
             v = os.environ.get(env_var, '')
@@ -250,7 +382,7 @@ append_deploy_key "workspace_deploy_key" "$(read_env PROVISION_WORKSPACE_DEPLOY_
 if [ -n "$agent_ids_str" ]; then
     for id in "${agent_ids[@]}"; do
         [ -z "$id" ] && continue
-        upper=$(echo "$id" | tr '[:lower:]' '[:upper:]')
+        upper=$(agent_env_suffix "$id")
         append_deploy_key "workspace_${id}_deploy_key" \
             "$(read_env "PROVISION_WORKSPACE_${upper}_DEPLOY_KEY")" "$SECRETS_FILE"
     done
@@ -258,6 +390,33 @@ fi
 
 # Append Codex auth credentials (block scalar preserves JSON structure)
 append_deploy_key "codex_auth_json" "$codex_auth_json" "$SECRETS_FILE"
+
+if [ "$multi_codex_enabled" = true ]; then
+    {
+        printf '%s\n' 'openclaw_codex_accounts:'
+        printf '%s\n' '  main:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+        printf '%s\n' '  deepseek-agent:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+        printf '%s\n' '  manfred:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+        printf '%s\n' '  barney:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+        printf '%s\n' '  gordon:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+        printf '%s\n' '  corby:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+        printf '%s\n' '  claudia:'
+        printf '%s\n' '    auth_jsons:'
+        emit_auth_yaml "$codex_auth_rbeyer1"
+    } >> "$SECRETS_FILE"
+fi
 chmod 600 "$SECRETS_FILE"
 
 echo "=== Waiting for Tailscale SSH connectivity ==="
